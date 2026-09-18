@@ -32,7 +32,8 @@ def init_db():
                 meme_id INTEGER,
                 chat_id INTEGER,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                status TEXT DEFAULT 'pending'
+                status TEXT DEFAULT 'pending',
+                message_id INTEGER
             )
         """)
         conn.execute("""
@@ -43,6 +44,11 @@ def init_db():
                 status TEXT DEFAULT 'pending'
             )
         """)
+        # Добавляем message_id, если колонки нет (для старых БД)
+        try:
+            conn.execute("ALTER TABLE pending_moderation ADD COLUMN message_id INTEGER")
+        except:
+            pass
         conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", ("daily_limit", "5"))
         conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", ("active_start_hour", "9"))
         conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", ("active_end_hour", "23"))
@@ -88,9 +94,12 @@ def mark_meme_scheduled(meme_id):
         conn.execute("UPDATE memes SET status = 'scheduled' WHERE id = ?", (meme_id,))
         conn.commit()
 
-def create_pending(meme_id, chat_id):
+def create_pending(meme_id, chat_id, message_id=None):
     with get_db() as conn:
-        cursor = conn.execute("INSERT INTO pending_moderation (meme_id, chat_id) VALUES (?, ?)", (meme_id, chat_id))
+        cursor = conn.execute(
+            "INSERT INTO pending_moderation (meme_id, chat_id, message_id) VALUES (?, ?, ?)",
+            (meme_id, chat_id, message_id)
+        )
         conn.commit()
         return cursor.lastrowid
 
@@ -102,6 +111,21 @@ def get_pending():
 def close_pending(pending_id, status):
     with get_db() as conn:
         conn.execute("UPDATE pending_moderation SET status = ? WHERE id = ?", (status, pending_id))
+        conn.commit()
+
+def get_old_pending(hours=1):
+    """Возвращает pending-записи старше N часов"""
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT * FROM pending_moderation
+            WHERE status = 'pending'
+              AND created_at <= datetime('now', '-' || ? || ' hours')
+        """, (hours,)).fetchall()
+        return [dict(row) for row in rows]
+
+def expire_pending(pending_id):
+    with get_db() as conn:
+        conn.execute("UPDATE pending_moderation SET status = 'expired' WHERE id = ?", (pending_id,))
         conn.commit()
 
 def get_meme_path(meme_id):

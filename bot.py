@@ -15,7 +15,7 @@ from database import (
     create_pending, get_pending, close_pending, mark_meme_posted,
     mark_meme_skipped, get_meme_path, add_scheduled_post,
     get_pending_scheduled, mark_scheduled_posted, mark_meme_scheduled,
-    get_scheduled_for_date
+    get_scheduled_for_date, get_old_pending, expire_pending
 )
 from scanner import scan_memes_folder
 
@@ -217,22 +217,38 @@ async def start_moderation(chat_id: int):
         await bot.send_message(chat_id, "📭 Нет новых мемов!")
         return
 
-    pending_id = create_pending(meme["id"], chat_id)
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ В очередь", callback_data="placeholder:0"),
+            InlineKeyboardButton(text="❌ Пропустить", callback_data="placeholder:0")
+        ]
+    ])
 
+    photo = FSInputFile(meme["file_path"])
+    sent = await bot.send_photo(
+        chat_id,
+        photo,
+        caption=f"📸 {meme['filename']}",
+        reply_markup=keyboard
+    )
+
+    pending_id = create_pending(meme["id"], chat_id, sent.message_id)
+
+    # Обновляем кнопки с реальным pending_id
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="✅ В очередь", callback_data=f"approve:{pending_id}"),
             InlineKeyboardButton(text="❌ Пропустить", callback_data=f"reject:{pending_id}")
         ]
     ])
-
-    photo = FSInputFile(meme["file_path"])
-    await bot.send_photo(
-        chat_id,
-        photo,
-        caption=f"📸 {meme['filename']}",
-        reply_markup=keyboard
-    )
+    try:
+        await bot.edit_message_reply_markup(
+            chat_id=chat_id,
+            message_id=sent.message_id,
+            reply_markup=keyboard
+        )
+    except Exception as e:
+        logging.error(f"Не удалось обновить кнопки: {e}")
 
 
 async def process_scheduled_posts():
@@ -252,6 +268,27 @@ async def process_scheduled_posts():
             logging.info(f"Опубликован отложенный мем {item['meme_id']}")
         except Exception as e:
             logging.error(f"Ошибка публикации отложенного мема: {e}")
+
+
+async def cleanup_old_pending():
+    """Удаляет устаревшие pending-записи и сообщения с кнопками"""
+    old = get_old_pending(hours=1)
+    for item in old:
+        if item.get("message_id"):
+            try:
+                await bot.delete_message(chat_id=item["chat_id"], message_id=item["message_id"])
+            except:
+                pass
+        expire_pending(item["id"])
+        try:
+            await bot.send_message(
+                item["chat_id"],
+                "⏰ Предыдущее предложение устарело (прошёл час). Напиши /moderate для нового."
+            )
+        except:
+            pass
+    if old:
+        logging.info(f"Очищено {len(old)} устаревших предложений")
 
 
 async def daily_index():
@@ -290,10 +327,11 @@ async def main():
     await check_channel_permissions()
 
     scheduler.add_job(process_scheduled_posts, 'interval', minutes=1)
+    scheduler.add_job(cleanup_old_pending, 'interval', minutes=5)
     scheduler.add_job(daily_index, 'cron', hour=9, minute=0)
 
     scheduler.start()
-    logging.info("Планировщик запущен: посты каждую минуту, индексация в 9:00")
+    logging.info("Планировщик запущен: посты каждую минуту, очистка каждые 5 минут, индексация в 9:00")
 
     await dp.start_polling(bot)
 

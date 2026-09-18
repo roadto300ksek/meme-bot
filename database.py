@@ -43,10 +43,9 @@ def init_db():
                 status TEXT DEFAULT 'pending'
             )
         """)
-        # Настройки по умолчанию
-        conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", ("daily_limit", str(5)))
-        conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", ("current_day_posts", "0"))
-        conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", ("channel_id", ""))
+        conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", ("daily_limit", "5"))
+        conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", ("active_start_hour", "9"))
+        conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", ("active_end_hour", "23"))
         conn.commit()
 
 def get_setting(key, default=None):
@@ -84,6 +83,11 @@ def mark_meme_skipped(meme_id):
         conn.execute("UPDATE memes SET status = 'skipped' WHERE id = ?", (meme_id,))
         conn.commit()
 
+def mark_meme_scheduled(meme_id):
+    with get_db() as conn:
+        conn.execute("UPDATE memes SET status = 'scheduled' WHERE id = ?", (meme_id,))
+        conn.commit()
+
 def create_pending(meme_id, chat_id):
     with get_db() as conn:
         cursor = conn.execute("INSERT INTO pending_moderation (meme_id, chat_id) VALUES (?, ?)", (meme_id, chat_id))
@@ -99,6 +103,11 @@ def close_pending(pending_id, status):
     with get_db() as conn:
         conn.execute("UPDATE pending_moderation SET status = ? WHERE id = ?", (status, pending_id))
         conn.commit()
+
+def get_meme_path(meme_id):
+    with get_db() as conn:
+        row = conn.execute("SELECT file_path FROM memes WHERE id = ?", (meme_id,)).fetchone()
+        return row["file_path"] if row else None
 
 def add_scheduled_post(meme_id, scheduled_at):
     with get_db() as conn:
@@ -118,10 +127,12 @@ def mark_scheduled_posted(scheduled_id):
         conn.execute("UPDATE scheduled_posts SET status = 'posted' WHERE id = ?", (scheduled_id,))
         conn.commit()
 
-def get_meme_path(meme_id):
+def get_scheduled_for_date(date_str):
+    """Возвращает все pending-посты на указанную дату (YYYY-MM-DD)"""
     with get_db() as conn:
-        row = conn.execute("SELECT file_path FROM memes WHERE id = ?", (meme_id,)).fetchone()
-        return row["file_path"] if row else None
-
-def reset_daily_counter():
-    set_setting("current_day_posts", 0)
+        rows = conn.execute("""
+            SELECT * FROM scheduled_posts
+            WHERE status = 'pending' AND scheduled_at LIKE ?
+            ORDER BY scheduled_at ASC
+        """, (f"{date_str}%",)).fetchall()
+        return [dict(row) for row in rows]

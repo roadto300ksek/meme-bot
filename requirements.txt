@@ -1,5 +1,6 @@
-Flask==3.0.3
 aiogram==3.13.1
+flask==3.0.3
 aiosqlite==0.20.0
 python-dotenv==1.0.1
 aiofiles==23.2.1
+apscheduler==3.10.4

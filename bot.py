@@ -43,7 +43,7 @@ def get_active_hours():
 
 
 def count_scheduled_today():
-    """Сколько постов уже запланировано на сегодня"""
+    """Сколько постов запланировано на сегодня (по дате scheduled_at)"""
     today = datetime.now().date().isoformat()
     return len(get_scheduled_for_date(today))
 
@@ -56,12 +56,19 @@ async def cmd_start(message: types.Message):
     limit = get_limit()
     start, end = get_active_hours()
     today_count = count_scheduled_today()
+    status_line = (
+        f"📅 Сегодня: {today_count} / {limit}"
+        if today_count < limit
+        else f"🎉 Лимит на сегодня набран ({today_count} / {limit})"
+    )
     await message.answer(
         f"🤖 Бот запущен!\n"
         f"📊 Лимит: {limit} постов в день\n"
-        f"🕐 Активные часы: {start}:00 – {end}:00\n"
-        f"📅 Сегодня одобрено: {today_count} / {limit}\n\n"
-        f"Бот сам будет присылать мемы, пока не наберёт лимит на день."
+        f"🕐 Часы: {start}:00 – {end}:00\n"
+        f"{status_line}\n\n"
+        f"Бот сам присылает мемы, пока не наберёт лимит.\n"
+        f"Если лимит набран, а ты хочешь добавить ещё — жми /moderate,\n"
+        f"мем уйдёт на следующий день."
     )
 
 
@@ -122,9 +129,19 @@ async def cmd_moderate(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
         return
     if has_active_pending(message.from_user.id):
-        await message.answer("⚠️ У тебя уже висит предложение.")
+        await message.answer("⚠️ У тебя уже висит предложение. Прими решение по нему.")
         return
-    await start_moderation(message.from_user.id)
+
+    limit = get_limit()
+    today_count = count_scheduled_today()
+    if today_count >= limit:
+        # Лимит набран — предупреждаем, но всё равно предлагаем (уйдёт на завтра)
+        await message.answer(
+            f"⚠️ Лимит на сегодня набран ({today_count}/{limit}).\n"
+            f"Мем, который ты одобришь, уйдёт на следующий свободный день."
+        )
+
+    await start_moderation(message.from_user.id, force=True)
 
 
 def get_next_slot_with_gap():
@@ -192,6 +209,7 @@ async def handle_callback(callback: types.CallbackQuery):
 
         today_count = count_scheduled_today()
         limit = get_limit()
+        # Если мем ушёл на завтра — today_count не вырос, и это нормально
         await bot.send_message(
             callback.from_user.id,
             f"✅ Мем на {slot_time.strftime('%d.%m %H:%M')}\n"
@@ -199,14 +217,15 @@ async def handle_callback(callback: types.CallbackQuery):
         )
         await callback.answer("✅ В очереди!")
 
-        # Сразу предлагаем следующий, если лимит на сегодня не достигнут
+        # Предлагаем следующий только если лимит на сегодня НЕ набран
         await asyncio.sleep(1)
         if today_count < limit:
             await start_moderation(callback.from_user.id)
         else:
             await bot.send_message(
                 callback.from_user.id,
-                f"🎉 Лимит на сегодня ({limit}) набран! Бот вернётся завтра."
+                f"🎉 Лимит на сегодня ({limit}) набран! Бот вернётся завтра.\n"
+                f"Если хочешь добавить сверх лимита — жми /moderate."
             )
 
     elif action == "reject":
@@ -219,17 +238,17 @@ async def handle_callback(callback: types.CallbackQuery):
         await bot.send_message(callback.from_user.id, "⏭ Пропущено")
         await callback.answer("⏭ Ок")
 
-        # Предлагаем следующий
+        # Предлагаем следующий всегда (пропуск не тратит лимит)
         await asyncio.sleep(1)
         await start_moderation(callback.from_user.id)
 
 
-async def start_moderation(chat_id: int):
-    # Проверяем лимит на сегодня
+async def start_moderation(chat_id: int, force: bool = False):
+    # Если не force и лимит на сегодня набран — молчим
     limit = get_limit()
     today_count = count_scheduled_today()
-    if today_count >= limit:
-        return  # Лимит достигнут — молчим
+    if not force and today_count >= limit:
+        return
 
     if has_active_pending(chat_id):
         return
@@ -247,13 +266,12 @@ async def start_moderation(chat_id: int):
         ]
     ])
 
+    caption = f"📸 {meme['filename']}\n📅 Сегодня: {today_count} / {limit}"
+    if today_count >= limit:
+        caption += "\n⚠️ Сверх лимита — уйдёт на завтра"
+
     photo = FSInputFile(meme["file_path"])
-    sent = await bot.send_photo(
-        chat_id,
-        photo,
-        caption=f"📸 {meme['filename']}\n📅 Сегодня: {today_count} / {limit}",
-        reply_markup=keyboard
-    )
+    sent = await bot.send_photo(chat_id, photo, caption=caption, reply_markup=keyboard)
     pending_id = create_pending(meme["id"], chat_id, sent.message_id)
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -335,7 +353,7 @@ async def main():
     scheduler.add_job(daily_index, 'cron', hour=9, minute=0)
     scheduler.start()
 
-    logging.info("Бот запущен. Автопредложение пока не набран лимит.")
+    logging.info("Бот запущен.")
 
     # При старте — предлагаем мем, если лимит не набран
     await asyncio.sleep(3)

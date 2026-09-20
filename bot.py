@@ -56,6 +56,17 @@ def count_scheduled_for_date(d):
     return len(get_scheduled_for_date(d.isoformat()))
 
 
+def day_label(d):
+    """Возвращает 'Сегодня' / 'Завтра' / 'ДД.ММ'"""
+    today = get_today()
+    if d == today:
+        return "Сегодня"
+    elif d == today + timedelta(days=1):
+        return "Завтра"
+    else:
+        return d.strftime('%d.%m')
+
+
 def compute_sha1(file_path):
     sha1 = hashlib.sha1()
     with open(file_path, "rb") as f:
@@ -352,13 +363,15 @@ async def handle_callback(callback: types.CallbackQuery):
         except:
             pass
 
-        today = get_today()
-        today_count = count_scheduled_for_date(today)
+        # Считаем счётчик для даты слота, а не для сегодня
+        slot_date = slot_time.date()
+        slot_count = count_scheduled_for_date(slot_date)
         limit = get_limit()
+
         await bot.send_message(
             callback.from_user.id,
             f"✅ Мем на {slot_time.strftime('%d.%m %H:%M')}\n"
-            f"📅 Сегодня: {today_count}/{limit}"
+            f"📅 {day_label(slot_date)} ({slot_date.strftime('%d.%m')}): {slot_count}/{limit}"
         )
         await callback.answer("✅ В очереди!")
 
@@ -457,7 +470,6 @@ async def start_moderation(force: bool = False):
     if has_active_pending_for_meme(meme["id"]):
         return
 
-    # Подпись простая — только имя файла
     caption = f"📸 {meme['filename']}"
 
     for admin_id in ADMIN_IDS:

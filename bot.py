@@ -57,7 +57,7 @@ def count_scheduled_for_date(d):
 
 
 def get_target_date():
-    """Дата, на которую сейчас надо ставить мемы. Если сегодня всё — то завтра."""
+    """Дата, на которую надо ставить мем. Если сегодня всё — то завтра."""
     today = get_today()
     if count_scheduled_for_date(today) < get_limit():
         return today
@@ -73,7 +73,6 @@ def compute_sha1(file_path):
 
 
 def format_caption(filename, target_date, count):
-    """Подпись под мемом: имя файла + дата и счётчик"""
     today = get_today()
     if target_date == today:
         day_label = f"Сегодня {target_date.strftime('%d.%m')}"
@@ -347,7 +346,6 @@ async def handle_callback(callback: types.CallbackQuery):
         mark_meme_scheduled(meme_id)
         close_pending(pending_id, "approved")
 
-        # Закрываем у других
         for op in get_pendings_for_meme(meme_id):
             if op["id"] != pending_id:
                 try:
@@ -417,7 +415,7 @@ async def handle_callback(callback: types.CallbackQuery):
 
 
 # ============================================================
-# АЛГОРИТМ СЛОТОВ
+# АЛГОРИТМ СЛОТОВ (фикс: пропускаем промежутки с серединой в прошлом)
 # ============================================================
 
 def get_next_slot_with_gap():
@@ -446,11 +444,15 @@ def get_next_slot_with_gap():
         best_mid = None
         for i in range(len(points) - 1):
             gap = (points[i+1] - points[i]).total_seconds()
+            mid = points[i] + (points[i+1] - points[i]) / 2
+            # Пропускаем промежутки, чья середина уже в прошлом
+            if mid <= now:
+                continue
             if gap > best_gap:
                 best_gap = gap
-                best_mid = points[i] + (points[i+1] - points[i]) / 2
+                best_mid = mid
 
-        if best_mid and best_mid > now:
+        if best_mid:
             return best_mid
 
     return None
@@ -461,7 +463,6 @@ def get_next_slot_with_gap():
 # ============================================================
 
 async def start_moderation(force: bool = False):
-    """Отправляет мем ВСЕМ админам. Если сегодня лимит — работает на завтра."""
     target_date = get_target_date()
     target_count = count_scheduled_for_date(target_date)
 

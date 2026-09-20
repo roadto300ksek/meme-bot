@@ -46,19 +46,15 @@ def get_active_hours():
     return start, end
 
 
-def get_work_date():
-    """Если сейчас до начала активных часов — это 'вчера'."""
-    now = datetime.now()
-    start_hour, _ = get_active_hours()
-    if now.hour < start_hour:
-        return (now - timedelta(days=1)).date()
-    return now.date()
+def get_today():
+    """Просто сегодняшняя календарная дата."""
+    return datetime.now().date()
 
 
-def count_scheduled_for_workdate(wd=None):
-    if wd is None:
-        wd = get_work_date()
-    return len(get_scheduled_for_date(wd.isoformat()))
+def count_scheduled_for_date(d=None):
+    if d is None:
+        d = get_today()
+    return len(get_scheduled_for_date(d.isoformat()))
 
 
 def compute_sha1(file_path):
@@ -80,12 +76,12 @@ async def cmd_start(message: types.Message):
         return
     limit = get_limit()
     start, end = get_active_hours()
-    wd = get_work_date()
-    today_count = count_scheduled_for_workdate(wd)
+    today = get_today()
+    today_count = count_scheduled_for_date(today)
     status_line = (
-        f"📅 На {wd.strftime('%d.%m')}: {today_count} / {limit}"
+        f"📅 Сегодня ({today.strftime('%d.%m')}): {today_count} / {limit}"
         if today_count < limit
-        else f"🎉 На {wd.strftime('%d.%m')} лимит набран ({today_count} / {limit})"
+        else f"🎉 Лимит на сегодня набран ({today_count} / {limit})"
     )
     await message.answer(
         f"🤖 Бот запущен!\n"
@@ -107,8 +103,8 @@ async def cmd_status(message: types.Message):
         return
     limit = get_limit()
     start, end = get_active_hours()
-    wd = get_work_date()
-    today_count = count_scheduled_for_workdate(wd)
+    today = get_today()
+    today_count = count_scheduled_for_date(today)
     pending = get_pending(message.from_user.id)
     stats = get_memes_stats()
     stats_text = "\n".join([f"  • {k}: {v}" for k, v in stats.items()]) or "  (пусто)"
@@ -118,7 +114,7 @@ async def cmd_status(message: types.Message):
         f"• Часы: {start}:00 – {end}:00\n"
         f"• Канал: {CHANNEL_ID or 'не задан'}\n"
         f"• Предложка: {SUGGESTION_CHAT_ID or 'не задана'}\n"
-        f"• Рабочий день: {wd.strftime('%d.%m')}\n"
+        f"• Сегодня: {today.strftime('%d.%m')}\n"
         f"• Одобрено: {today_count} / {limit}\n"
         f"• Модерация: {'есть активная' if pending else 'нет'}\n\n"
         f"📦 Мемы в базе:\n{stats_text}"
@@ -165,11 +161,11 @@ async def cmd_moderate(message: types.Message):
         return
 
     limit = get_limit()
-    wd = get_work_date()
-    today_count = count_scheduled_for_workdate(wd)
+    today = get_today()
+    today_count = count_scheduled_for_date(today)
     if today_count >= limit:
         await message.answer(
-            f"⚠️ На {wd.strftime('%d.%m')} лимит набран ({today_count}/{limit}).\n"
+            f"⚠️ На сегодня ({today.strftime('%d.%m')}) лимит набран ({today_count}/{limit}).\n"
             f"Мем уйдёт на следующий свободный день."
         )
     await start_moderation(message.from_user.id, force=True)
@@ -323,13 +319,13 @@ async def handle_callback(callback: types.CallbackQuery):
             await callback.message.delete()
         except:
             pass
-        wd = get_work_date()
-        today_count = count_scheduled_for_workdate(wd)
+        today = get_today()
+        today_count = count_scheduled_for_date(today)
         limit = get_limit()
         await bot.send_message(
             callback.from_user.id,
             f"✅ Мем на {slot_time.strftime('%d.%m %H:%M')}\n"
-            f"📅 На {wd.strftime('%d.%m')}: {today_count} / {limit}"
+            f"📅 Сегодня ({today.strftime('%d.%m')}): {today_count} / {limit}"
         )
         await callback.answer("✅ В очереди!")
 
@@ -339,7 +335,7 @@ async def handle_callback(callback: types.CallbackQuery):
         else:
             await bot.send_message(
                 callback.from_user.id,
-                f"🎉 Лимит на {wd.strftime('%d.%m')} набран ({limit}). Бот вернётся завтра."
+                f"🎉 Лимит на сегодня ({limit}) набран. Бот вернётся завтра."
             )
 
     elif action == "reject":
@@ -401,8 +397,8 @@ def get_next_slot_with_gap():
 
 async def start_moderation(chat_id: int, force: bool = False):
     limit = get_limit()
-    wd = get_work_date()
-    today_count = count_scheduled_for_workdate(wd)
+    today = get_today()
+    today_count = count_scheduled_for_date(today)
     if not force and today_count >= limit:
         return
 
@@ -422,7 +418,7 @@ async def start_moderation(chat_id: int, force: bool = False):
         ]
     ])
 
-    caption = f"📸 {meme['filename']}\n📅 На {wd.strftime('%d.%m')}: {today_count} / {limit}"
+    caption = f"📸 {meme['filename']}\n📅 Сегодня ({today.strftime('%d.%m')}): {today_count} / {limit}"
     if today_count >= limit:
         caption += "\n⚠️ Сверх лимита — уйдёт на завтра"
 
@@ -454,7 +450,6 @@ async def process_scheduled_posts():
     if not (start_hour <= now.hour < end_hour):
         return
 
-    # Проверяем, сколько уже опубликовано сегодня
     if count_posted_today() >= get_limit():
         return
 
@@ -496,8 +491,8 @@ async def cleanup_old_pending():
                     pass
             expire_pending(item["id"])
         limit = get_limit()
-        wd = get_work_date()
-        today_count = count_scheduled_for_workdate(wd)
+        today = get_today()
+        today_count = count_scheduled_for_date(today)
         if today_count < limit:
             await asyncio.sleep(1)
             await start_moderation(chat_id)
@@ -543,8 +538,8 @@ async def main():
     await asyncio.sleep(3)
     for admin_id in ADMIN_IDS:
         limit = get_limit()
-        wd = get_work_date()
-        today_count = count_scheduled_for_workdate(wd)
+        today = get_today()
+        today_count = count_scheduled_for_date(today)
         if today_count < limit:
             await start_moderation(admin_id)
 

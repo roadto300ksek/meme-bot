@@ -122,7 +122,8 @@ def mark_meme_scheduled(meme_id):
         conn.commit()
 
 
-def has_active_pending(chat_id):
+def has_active_pending_for_chat(chat_id):
+    """Есть ли у этого чата активный pending"""
     with get_db() as conn:
         row = conn.execute("""
             SELECT id FROM pending_moderation
@@ -130,6 +131,44 @@ def has_active_pending(chat_id):
             LIMIT 1
         """, (chat_id,)).fetchone()
         return row is not None
+
+
+def has_any_active_pending():
+    """Есть ли хоть один активный pending вообще"""
+    with get_db() as conn:
+        row = conn.execute("""
+            SELECT id FROM pending_moderation
+            WHERE status = 'pending'
+            LIMIT 1
+        """).fetchone()
+        return row is not None
+
+
+def has_active_pending_for_meme(meme_id):
+    """Есть ли активный pending на этот мем"""
+    with get_db() as conn:
+        row = conn.execute("""
+            SELECT id FROM pending_moderation
+            WHERE meme_id = ? AND status = 'pending'
+            LIMIT 1
+        """, (meme_id,)).fetchone()
+        return row is not None
+
+
+def get_pending_by_id(pending_id):
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM pending_moderation WHERE id = ?", (pending_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def get_pendings_for_meme(meme_id):
+    """Все pending на конкретный мем"""
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT * FROM pending_moderation
+            WHERE meme_id = ? AND status = 'pending'
+        """, (meme_id,)).fetchall()
+        return [dict(row) for row in rows]
 
 
 def create_pending(meme_id, chat_id, message_id=None):
@@ -142,23 +181,31 @@ def create_pending(meme_id, chat_id, message_id=None):
         return cursor.lastrowid
 
 
-def get_pending(chat_id=None):
-    with get_db() as conn:
-        if chat_id is not None:
-            row = conn.execute(
-                "SELECT * FROM pending_moderation WHERE status = 'pending' AND chat_id = ? ORDER BY id DESC LIMIT 1",
-                (chat_id,)
-            ).fetchone()
-        else:
-            row = conn.execute(
-                "SELECT * FROM pending_moderation WHERE status = 'pending' ORDER BY id DESC LIMIT 1"
-            ).fetchone()
-        return dict(row) if row else None
-
-
 def close_pending(pending_id, status):
     with get_db() as conn:
         conn.execute("UPDATE pending_moderation SET status = ? WHERE id = ?", (status, pending_id))
+        conn.commit()
+
+
+def close_pendings_for_meme(meme_id, except_id=None, status="expired"):
+    """Закрывает все pending на этот мем, кроме указанного"""
+    with get_db() as conn:
+        if except_id:
+            conn.execute("""
+                UPDATE pending_moderation SET status = ?
+                WHERE meme_id = ? AND status = 'pending' AND id != ?
+            """, (status, meme_id, except_id))
+        else:
+            conn.execute("""
+                UPDATE pending_moderation SET status = ?
+                WHERE meme_id = ? AND status = 'pending'
+            """, (status, meme_id))
+        conn.commit()
+
+
+def close_all_pending(status="expired"):
+    with get_db() as conn:
+        conn.execute("UPDATE pending_moderation SET status = ? WHERE status = 'pending'", (status,))
         conn.commit()
 
 
@@ -221,7 +268,6 @@ def get_scheduled_for_date(date_str):
 
 
 def count_posted_today():
-    """Сколько реально опубликовано сегодня (по дате scheduled_at)"""
     from datetime import datetime
     today = datetime.now().date().isoformat()
     with get_db() as conn:
@@ -230,6 +276,18 @@ def count_posted_today():
             WHERE status = 'posted' AND scheduled_at LIKE ?
         """, (f"{today}%",)).fetchone()
         return row[0] if row else 0
+
+
+def clear_scheduled():
+    with get_db() as conn:
+        conn.execute("DELETE FROM scheduled_posts")
+        conn.commit()
+
+
+def reset_scheduled_to_new():
+    with get_db() as conn:
+        conn.execute("UPDATE memes SET status = 'new' WHERE status = 'scheduled'")
+        conn.commit()
 
 
 def get_memes_stats():

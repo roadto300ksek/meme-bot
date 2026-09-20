@@ -14,12 +14,15 @@ load_dotenv('/home/linus/meme-bot/.env')
 
 from database import (
     init_db, get_setting, set_setting, get_random_unposted_meme,
-    create_pending, get_pending, close_pending, mark_meme_posted,
+    create_pending, close_pending, mark_meme_posted,
     mark_meme_skipped, get_meme_path, add_scheduled_post,
     get_pending_scheduled, mark_scheduled_posted, mark_meme_scheduled,
     get_scheduled_for_date, expire_pending,
-    has_active_pending, get_old_pending_grouped, get_memes_stats,
-    add_meme, get_meme_by_sha1, count_posted_today
+    has_active_pending_for_chat, has_any_active_pending,
+    has_active_pending_for_meme, get_pending_by_id,
+    get_pendings_for_meme, close_pendings_for_meme, close_all_pending,
+    get_old_pending_grouped, get_memes_stats, add_meme, get_meme_by_sha1,
+    count_posted_today, clear_scheduled, reset_scheduled_to_new
 )
 from scanner import scan_memes_folder
 
@@ -47,7 +50,6 @@ def get_active_hours():
 
 
 def get_today():
-    """Просто сегодняшняя календарная дата."""
     return datetime.now().date()
 
 
@@ -93,7 +95,9 @@ async def cmd_start(message: types.Message):
         f"/moderate — запросить мем вручную\n"
         f"/status — статус\n"
         f"/set_limit N — лимит\n"
-        f"/set_hours X Y — часы активности"
+        f"/set_hours X Y — часы активности\n"
+        f"/simulate_new_day — сброс для теста\n"
+        f"/reset_moderation — сбросить модерацию"
     )
 
 
@@ -105,7 +109,6 @@ async def cmd_status(message: types.Message):
     start, end = get_active_hours()
     today = get_today()
     today_count = count_scheduled_for_date(today)
-    pending = get_pending(message.from_user.id)
     stats = get_memes_stats()
     stats_text = "\n".join([f"  • {k}: {v}" for k, v in stats.items()]) or "  (пусто)"
     await message.answer(
@@ -115,8 +118,7 @@ async def cmd_status(message: types.Message):
         f"• Канал: {CHANNEL_ID or 'не задан'}\n"
         f"• Предложка: {SUGGESTION_CHAT_ID or 'не задана'}\n"
         f"• Сегодня: {today.strftime('%d.%m')}\n"
-        f"• Одобрено: {today_count} / {limit}\n"
-        f"• Модерация: {'есть активная' if pending else 'нет'}\n\n"
+        f"• Одобрено: {today_count} / {limit}\n\n"
         f"📦 Мемы в базе:\n{stats_text}"
     )
 
@@ -156,10 +158,6 @@ async def cmd_set_hours(message: types.Message):
 async def cmd_moderate(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
         return
-    if has_active_pending(message.from_user.id):
-        await message.answer("⚠️ У тебя уже висит предложение. Прими решение по нему.")
-        return
-
     limit = get_limit()
     today = get_today()
     today_count = count_scheduled_for_date(today)
@@ -168,7 +166,35 @@ async def cmd_moderate(message: types.Message):
             f"⚠️ На сегодня ({today.strftime('%d.%m')}) лимит набран ({today_count}/{limit}).\n"
             f"Мем уйдёт на следующий свободный день."
         )
-    await start_moderation(message.from_user.id, force=True)
+    await start_moderation(force=True)
+
+
+@dp.message(Command("simulate_new_day"))
+async def cmd_simulate_new_day(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    close_all_pending("expired")
+    clear_scheduled()
+    reset_scheduled_to_new()
+    await message.answer(
+        "🔄 Симуляция нового дня:\n"
+        "• Расписание очищено\n"
+        "• Мемы возвращены в пул\n"
+        "• Модерация сброшена\n\n"
+        "Запускаю модерацию..."
+    )
+    await asyncio.sleep(1)
+    await start_moderation(force=True)
+
+
+@dp.message(Command("reset_moderation"))
+async def cmd_reset_moderation(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    close_all_pending("expired")
+    await message.answer("🔄 Модерация сброшена. Запускаю заново...")
+    await asyncio.sleep(1)
+    await start_moderation(force=True)
 
 
 # ============================================================
@@ -220,17 +246,17 @@ async def handle_suggestion(message: types.Message):
         os.remove(file_path)
         return
 
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="✅ В очередь", callback_data=f"sug_approve:{meme_id}"),
-            InlineKeyboardButton(text="❌ Пропустить", callback_data=f"sug_reject:{meme_id}")
-        ]
-    ])
-
     user_name = message.from_user.full_name or f"id{message.from_user.id}"
-    caption = f"📥 Мем из предложки\nОт: {user_name}"
 
+    # Отправляем всем админам СВОЙ pending на этот мем
     for admin_id in ADMIN_IDS:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ В очередь", callback_data=f"sug_approve:{meme_id}:{admin_id}"),
+                InlineKeyboardButton(text="❌ Пропустить", callback_data=f"sug_reject:{meme_id}:{admin_id}")
+            ]
+        ])
+        caption = f"📥 Мем из предложки\nОт: {user_name}"
         try:
             if file_ext == ".jpg":
                 await bot.send_photo(admin_id, FSInputFile(file_path), caption=caption, reply_markup=keyboard)
@@ -261,8 +287,18 @@ async def handle_callback(callback: types.CallbackQuery):
 
     # --- Кнопки из предложки ---
     if data.startswith("sug_approve:") or data.startswith("sug_reject:"):
-        action, meme_id = data.split(":")
-        meme_id = int(meme_id)
+        parts = data.split(":")
+        action = parts[0]
+        meme_id = int(parts[1])
+
+        meme = get_meme_by_id(meme_id)
+        if not meme or meme["status"] != "new":
+            await callback.answer("❌ Мем уже обработан", show_alert=True)
+            try:
+                await callback.message.edit_reply_markup(reply_markup=None)
+            except:
+                pass
+            return
 
         if action == "sug_approve":
             if not CHANNEL_ID:
@@ -275,21 +311,18 @@ async def handle_callback(callback: types.CallbackQuery):
             add_scheduled_post(meme_id, slot_time.isoformat())
             mark_meme_scheduled(meme_id)
             try:
-                await callback.message.delete()
+                await callback.message.edit_caption(
+                    caption=f"✅ Мем из предложки на {slot_time.strftime('%d.%m %H:%M')} (взял {callback.from_user.full_name})"
+                )
             except:
                 pass
-            await bot.send_message(
-                callback.from_user.id,
-                f"✅ Мем из предложки на {slot_time.strftime('%d.%m %H:%M')}"
-            )
             await callback.answer("✅ В очереди!")
         else:
             mark_meme_skipped(meme_id)
             try:
-                await callback.message.delete()
+                await callback.message.edit_caption(caption=f"⏭ Пропущено (взял {callback.from_user.full_name})")
             except:
                 pass
-            await bot.send_message(callback.from_user.id, "⏭ Мем из предложки пропущен")
             await callback.answer("⏭ Ок")
         return
 
@@ -297,9 +330,13 @@ async def handle_callback(callback: types.CallbackQuery):
     action, pending_id = data.split(":")
     pending_id = int(pending_id)
 
-    pending = get_pending(callback.from_user.id)
-    if not pending or pending["id"] != pending_id:
-        await callback.answer("❌ Устарело", show_alert=True)
+    pending = get_pending_by_id(pending_id)
+    if not pending or pending["status"] != "pending":
+        await callback.answer("❌ Мем уже обработан", show_alert=True)
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except:
+            pass
         return
 
     meme_id = pending["meme_id"]
@@ -312,13 +349,39 @@ async def handle_callback(callback: types.CallbackQuery):
         if not slot_time:
             await callback.answer("❌ Нет свободных слотов!", show_alert=True)
             return
+
+        # Кто первый — тот и одобрил
         add_scheduled_post(meme_id, slot_time.isoformat())
         mark_meme_scheduled(meme_id)
         close_pending(pending_id, "approved")
+
+        # Закрываем pending на этот же мем у других админов
+        other_pendings = get_pendings_for_meme(meme_id)
+        for op in other_pendings:
+            if op["id"] != pending_id:
+                try:
+                    await bot.edit_message_caption(
+                        chat_id=op["chat_id"],
+                        message_id=op["message_id"],
+                        caption=f"✅ Мем уже одобрен ({callback.from_user.full_name})"
+                    )
+                except:
+                    pass
+                try:
+                    await bot.edit_message_reply_markup(
+                        chat_id=op["chat_id"],
+                        message_id=op["message_id"],
+                        reply_markup=None
+                    )
+                except:
+                    pass
+                close_pending(op["id"], "expired")
+
         try:
             await callback.message.delete()
         except:
             pass
+
         today = get_today()
         today_count = count_scheduled_for_date(today)
         limit = get_limit()
@@ -331,16 +394,34 @@ async def handle_callback(callback: types.CallbackQuery):
 
         await asyncio.sleep(1)
         if today_count < limit:
-            await start_moderation(callback.from_user.id)
-        else:
-            await bot.send_message(
-                callback.from_user.id,
-                f"🎉 Лимит на сегодня ({limit}) набран. Бот вернётся завтра."
-            )
+            await start_moderation(force=True)
 
     elif action == "reject":
         mark_meme_skipped(meme_id)
         close_pending(pending_id, "rejected")
+
+        # Закрываем у других
+        other_pendings = get_pendings_for_meme(meme_id)
+        for op in other_pendings:
+            if op["id"] != pending_id:
+                try:
+                    await bot.edit_message_caption(
+                        chat_id=op["chat_id"],
+                        message_id=op["message_id"],
+                        caption=f"⏭ Мем пропущен ({callback.from_user.full_name})"
+                    )
+                except:
+                    pass
+                try:
+                    await bot.edit_message_reply_markup(
+                        chat_id=op["chat_id"],
+                        message_id=op["message_id"],
+                        reply_markup=None
+                    )
+                except:
+                    pass
+                close_pending(op["id"], "expired")
+
         try:
             await callback.message.delete()
         except:
@@ -348,7 +429,7 @@ async def handle_callback(callback: types.CallbackQuery):
         await bot.send_message(callback.from_user.id, "⏭ Пропущено")
         await callback.answer("⏭ Ок")
         await asyncio.sleep(1)
-        await start_moderation(callback.from_user.id)
+        await start_moderation(force=True)
 
 
 # ============================================================
@@ -395,47 +476,60 @@ def get_next_slot_with_gap():
 # МОДЕРАЦИЯ ИЗ ПАПКИ
 # ============================================================
 
-async def start_moderation(chat_id: int, force: bool = False):
+async def start_moderation(force: bool = False):
+    """Отправляет мем ВСЕМ админам. Каждый получает свой pending."""
     limit = get_limit()
     today = get_today()
     today_count = count_scheduled_for_date(today)
     if not force and today_count >= limit:
         return
 
-    if has_active_pending(chat_id):
-        return
-
+    # Не плодим мемы, если на этот мем уже есть активные pending
     scan_memes_folder()
     meme = get_random_unposted_meme()
     if not meme:
-        await bot.send_message(chat_id, "📭 Нет новых мемов!")
+        for admin_id in ADMIN_IDS:
+            await bot.send_message(admin_id, "📭 Нет новых мемов!")
         return
 
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="✅ В очередь", callback_data="placeholder:0"),
-            InlineKeyboardButton(text="❌ Пропустить", callback_data="placeholder:0")
-        ]
-    ])
+    # Если на этот мем уже есть pending — не дублируем
+    if has_active_pending_for_meme(meme["id"]):
+        return
 
     caption = f"📸 {meme['filename']}\n📅 Сегодня ({today.strftime('%d.%m')}): {today_count} / {limit}"
     if today_count >= limit:
         caption += "\n⚠️ Сверх лимита — уйдёт на завтра"
 
-    photo = FSInputFile(meme["file_path"])
-    sent = await bot.send_photo(chat_id, photo, caption=caption, reply_markup=keyboard)
-    pending_id = create_pending(meme["id"], chat_id, sent.message_id)
+    # Отправляем всем админам, каждому свой pending
+    for admin_id in ADMIN_IDS:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ В очередь", callback_data="placeholder:0"),
+                InlineKeyboardButton(text="❌ Пропустить", callback_data="placeholder:0")
+            ]
+        ])
+        try:
+            sent = await bot.send_photo(
+                admin_id,
+                FSInputFile(meme["file_path"]),
+                caption=caption,
+                reply_markup=keyboard
+            )
+            pending_id = create_pending(meme["id"], admin_id, sent.message_id)
 
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="✅ В очередь", callback_data=f"approve:{pending_id}"),
-            InlineKeyboardButton(text="❌ Пропустить", callback_data=f"reject:{pending_id}")
-        ]
-    ])
-    try:
-        await bot.edit_message_reply_markup(chat_id=chat_id, message_id=sent.message_id, reply_markup=keyboard)
-    except Exception as e:
-        logging.error(f"Ошибка кнопок: {e}")
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅ В очередь", callback_data=f"approve:{pending_id}"),
+                    InlineKeyboardButton(text="❌ Пропустить", callback_data=f"reject:{pending_id}")
+                ]
+            ])
+            await bot.edit_message_reply_markup(
+                chat_id=admin_id,
+                message_id=sent.message_id,
+                reply_markup=keyboard
+            )
+        except Exception as e:
+            logging.error(f"Ошибка отправки админу {admin_id}: {e}")
 
 
 # ============================================================
@@ -443,7 +537,6 @@ async def start_moderation(chat_id: int, force: bool = False):
 # ============================================================
 
 async def process_scheduled_posts():
-    """Публикует ОДИН мем за раз, только в активные часы."""
     now = datetime.now()
     start_hour, end_hour = get_active_hours()
 
@@ -490,12 +583,13 @@ async def cleanup_old_pending():
                 except:
                     pass
             expire_pending(item["id"])
+    if grouped:
         limit = get_limit()
         today = get_today()
         today_count = count_scheduled_for_date(today)
         if today_count < limit:
             await asyncio.sleep(1)
-            await start_moderation(chat_id)
+            await start_moderation(force=True)
 
 
 async def daily_index():
@@ -536,12 +630,11 @@ async def main():
     logging.info("Бот запущен.")
 
     await asyncio.sleep(3)
-    for admin_id in ADMIN_IDS:
-        limit = get_limit()
-        today = get_today()
-        today_count = count_scheduled_for_date(today)
-        if today_count < limit:
-            await start_moderation(admin_id)
+    limit = get_limit()
+    today = get_today()
+    today_count = count_scheduled_for_date(today)
+    if today_count < limit:
+        await start_moderation(force=True)
 
     await dp.start_polling(bot)
 

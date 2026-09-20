@@ -3,7 +3,7 @@ import hashlib
 import logging
 import os
 import uuid
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -19,7 +19,7 @@ from database import (
     get_pending_scheduled, mark_scheduled_posted, mark_meme_scheduled,
     get_scheduled_for_date, expire_pending,
     has_active_pending, get_old_pending_grouped, get_memes_stats,
-    add_meme, get_meme_by_sha1
+    add_meme, get_meme_by_sha1, count_posted_today
 )
 from scanner import scan_memes_folder
 
@@ -47,7 +47,7 @@ def get_active_hours():
 
 
 def get_work_date():
-    """Возвращает 'рабочую дату'. Если сейчас до начала активных часов — это вчера."""
+    """Если сейчас до начала активных часов — это 'вчера'."""
     now = datetime.now()
     start_hour, _ = get_active_hours()
     if now.hour < start_hour:
@@ -56,7 +56,6 @@ def get_work_date():
 
 
 def count_scheduled_for_workdate(wd=None):
-    """Сколько постов запланировано на указанную рабочую дату"""
     if wd is None:
         wd = get_work_date()
     return len(get_scheduled_for_date(wd.isoformat()))
@@ -110,7 +109,7 @@ async def cmd_status(message: types.Message):
     start, end = get_active_hours()
     wd = get_work_date()
     today_count = count_scheduled_for_workdate(wd)
-    pending = get_pending()
+    pending = get_pending(message.from_user.id)
     stats = get_memes_stats()
     stats_text = "\n".join([f"  • {k}: {v}" for k, v in stats.items()]) or "  (пусто)"
     await message.answer(
@@ -264,6 +263,7 @@ async def handle_callback(callback: types.CallbackQuery):
 
     data = callback.data
 
+    # --- Кнопки из предложки ---
     if data.startswith("sug_approve:") or data.startswith("sug_reject:"):
         action, meme_id = data.split(":")
         meme_id = int(meme_id)
@@ -297,10 +297,11 @@ async def handle_callback(callback: types.CallbackQuery):
             await callback.answer("⏭ Ок")
         return
 
+    # --- Обычные кнопки ---
     action, pending_id = data.split(":")
     pending_id = int(pending_id)
 
-    pending = get_pending()
+    pending = get_pending(callback.from_user.id)
     if not pending or pending["id"] != pending_id:
         await callback.answer("❌ Устарело", show_alert=True)
         return
@@ -446,35 +447,22 @@ async def start_moderation(chat_id: int, force: bool = False):
 # ============================================================
 
 async def process_scheduled_posts():
-    """Публикует один мем за раз, только в активные часы, только если лимит не превышен."""
+    """Публикует ОДИН мем за раз, только в активные часы."""
     now = datetime.now()
     start_hour, end_hour = get_active_hours()
 
-    # Не постим вне активных часов
     if not (start_hour <= now.hour < end_hour):
         return
 
-    # Сколько уже опубликовано сегодня (по posted_at)
-    today_str = now.date().isoformat()
-    # Считаем посты, у которых posted_at сегодня
-    from database import get_db
-    with get_db() as conn:
-        row = conn.execute("""
-            SELECT COUNT(*) FROM scheduled_posts
-            WHERE status = 'posted' AND scheduled_at LIKE ?
-        """, (f"{today_str}%",)).fetchone()
-        published_today = row[0] if row else 0
-
-    limit = get_limit()
-    if published_today >= limit:
+    # Проверяем, сколько уже опубликовано сегодня
+    if count_posted_today() >= get_limit():
         return
 
-    # Берём только ОДИН мем, который пора публиковать
     scheduled = get_pending_scheduled()
     if not scheduled:
         return
 
-    item = scheduled[0]  # Первый по времени
+    item = scheduled[0]
     if not CHANNEL_ID:
         return
 

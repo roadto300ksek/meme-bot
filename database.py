@@ -44,7 +44,6 @@ def init_db():
                 status TEXT DEFAULT 'pending'
             )
         """)
-        # Миграции
         try:
             conn.execute("ALTER TABLE memes ADD COLUMN submitted_by INTEGER")
         except:
@@ -143,9 +142,17 @@ def create_pending(meme_id, chat_id, message_id=None):
         return cursor.lastrowid
 
 
-def get_pending():
+def get_pending(chat_id=None):
     with get_db() as conn:
-        row = conn.execute("SELECT * FROM pending_moderation WHERE status = 'pending' ORDER BY id DESC LIMIT 1").fetchone()
+        if chat_id is not None:
+            row = conn.execute(
+                "SELECT * FROM pending_moderation WHERE status = 'pending' AND chat_id = ? ORDER BY id DESC LIMIT 1",
+                (chat_id,)
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT * FROM pending_moderation WHERE status = 'pending' ORDER BY id DESC LIMIT 1"
+            ).fetchone()
         return dict(row) if row else None
 
 
@@ -211,6 +218,18 @@ def get_scheduled_for_date(date_str):
             ORDER BY scheduled_at ASC
         """, (f"{date_str}%",)).fetchall()
         return [dict(row) for row in rows]
+
+
+def count_posted_today():
+    """Сколько реально опубликовано сегодня (по дате scheduled_at)"""
+    from datetime import datetime
+    today = datetime.now().date().isoformat()
+    with get_db() as conn:
+        row = conn.execute("""
+            SELECT COUNT(*) FROM scheduled_posts
+            WHERE status = 'posted' AND scheduled_at LIKE ?
+        """, (f"{today}%",)).fetchone()
+        return row[0] if row else 0
 
 
 def get_memes_stats():

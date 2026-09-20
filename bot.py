@@ -56,29 +56,12 @@ def count_scheduled_for_date(d):
     return len(get_scheduled_for_date(d.isoformat()))
 
 
-def get_target_date():
-    """Дата, на которую надо ставить мем. Если сегодня всё — то завтра."""
-    today = get_today()
-    if count_scheduled_for_date(today) < get_limit():
-        return today
-    return today + timedelta(days=1)
-
-
 def compute_sha1(file_path):
     sha1 = hashlib.sha1()
     with open(file_path, "rb") as f:
         while chunk := f.read(8192):
             sha1.update(chunk)
     return sha1.hexdigest()
-
-
-def format_caption(filename, target_date, count):
-    today = get_today()
-    if target_date == today:
-        day_label = f"Сегодня {target_date.strftime('%d.%m')}"
-    else:
-        day_label = f"На {target_date.strftime('%d.%m')}"
-    return f"📸 {filename}\n📅 {day_label}: {count}/{get_limit()}"
 
 
 # ============================================================
@@ -93,18 +76,16 @@ async def cmd_start(message: types.Message):
     limit = get_limit()
     start, end = get_active_hours()
     today = get_today()
+    tomorrow = today + timedelta(days=1)
     today_count = count_scheduled_for_date(today)
-    status_line = (
-        f"📅 Сегодня ({today.strftime('%d.%m')}): {today_count} / {limit}"
-        if today_count < limit
-        else f"🎉 Лимит на сегодня набран ({today_count} / {limit})"
-    )
+    tomorrow_count = count_scheduled_for_date(tomorrow)
     await message.answer(
         f"🤖 Бот запущен!\n"
-        f"📊 Лимит: {limit} постов в день\n"
+        f"📊 Лимит: {limit}/день\n"
         f"🕐 Часы: {start}:00 – {end}:00\n"
-        f"{status_line}\n"
-        f"📥 Предложка: {SUGGESTION_CHAT_ID or 'не задана'}\n\n"
+        f"📅 Сегодня ({today.strftime('%d.%m')}): {today_count}/{limit}\n"
+        f"📅 Завтра ({tomorrow.strftime('%d.%m')}): {tomorrow_count}/{limit}\n"
+        f"📥 Предложка: {SUGGESTION_CHAT_ID or '—'}\n\n"
         f"/moderate — мем вручную\n"
         f"/status — статус\n"
         f"/set_limit N — лимит\n"
@@ -371,9 +352,13 @@ async def handle_callback(callback: types.CallbackQuery):
         except:
             pass
 
+        today = get_today()
+        today_count = count_scheduled_for_date(today)
+        limit = get_limit()
         await bot.send_message(
             callback.from_user.id,
-            f"✅ Мем на {slot_time.strftime('%d.%m %H:%M')}"
+            f"✅ Мем на {slot_time.strftime('%d.%m %H:%M')}\n"
+            f"📅 Сегодня: {today_count}/{limit}"
         )
         await callback.answer("✅ В очереди!")
 
@@ -415,7 +400,7 @@ async def handle_callback(callback: types.CallbackQuery):
 
 
 # ============================================================
-# АЛГОРИТМ СЛОТОВ (фикс: пропускаем промежутки с серединой в прошлом)
+# АЛГОРИТМ СЛОТОВ
 # ============================================================
 
 def get_next_slot_with_gap():
@@ -445,7 +430,6 @@ def get_next_slot_with_gap():
         for i in range(len(points) - 1):
             gap = (points[i+1] - points[i]).total_seconds()
             mid = points[i] + (points[i+1] - points[i]) / 2
-            # Пропускаем промежутки, чья середина уже в прошлом
             if mid <= now:
                 continue
             if gap > best_gap:
@@ -463,9 +447,6 @@ def get_next_slot_with_gap():
 # ============================================================
 
 async def start_moderation(force: bool = False):
-    target_date = get_target_date()
-    target_count = count_scheduled_for_date(target_date)
-
     scan_memes_folder()
     meme = get_random_unposted_meme()
     if not meme:
@@ -476,7 +457,8 @@ async def start_moderation(force: bool = False):
     if has_active_pending_for_meme(meme["id"]):
         return
 
-    caption = format_caption(meme["filename"], target_date, target_count)
+    # Подпись простая — только имя файла
+    caption = f"📸 {meme['filename']}"
 
     for admin_id in ADMIN_IDS:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[

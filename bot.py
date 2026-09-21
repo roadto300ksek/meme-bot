@@ -57,7 +57,6 @@ def count_scheduled_for_date(d):
 
 
 def day_label(d):
-    """Возвращает 'Сегодня' / 'Завтра' / 'ДД.ММ'"""
     today = get_today()
     if d == today:
         return "Сегодня"
@@ -90,19 +89,23 @@ async def cmd_start(message: types.Message):
     tomorrow = today + timedelta(days=1)
     today_count = count_scheduled_for_date(today)
     tomorrow_count = count_scheduled_for_date(tomorrow)
+    test_mode = get_setting("test_mode", "0") == "1"
+    test_line = "🧪 ТЕСТОВЫЙ РЕЖИМ АКТИВЕН\n" if test_mode else ""
     await message.answer(
+        f"{test_line}"
         f"🤖 Бот запущен!\n"
         f"📊 Лимит: {limit}/день\n"
         f"🕐 Часы: {start}:00 – {end}:00\n"
         f"📅 Сегодня ({today.strftime('%d.%m')}): {today_count}/{limit}\n"
-        f"📅 Завтра ({tomorrow.strftime('%d.%m')}): {tomorrow_count}/{limit}\n"
-        f"📥 Предложка: {SUGGESTION_CHAT_ID or '—'}\n\n"
+        f"📅 Завтра ({tomorrow.strftime('%d.%m')}): {tomorrow_count}/{limit}\n\n"
         f"/moderate — мем вручную\n"
         f"/status — статус\n"
         f"/set_limit N — лимит\n"
         f"/set_hours X Y — часы\n"
-        f"/simulate_new_day — тест\n"
-        f"/reset_moderation — сброс"
+        f"/test_cycle — тест полного дня\n"
+        f"/test_cycle_end — выйти из теста\n"
+        f"/simulate_new_day — полный сброс\n"
+        f"/reset_moderation — сброс модерации"
     )
 
 
@@ -118,8 +121,10 @@ async def cmd_status(message: types.Message):
     tomorrow_count = count_scheduled_for_date(tomorrow)
     stats = get_memes_stats()
     stats_text = "\n".join([f"  • {k}: {v}" for k, v in stats.items()]) or "  (пусто)"
+    test_mode = get_setting("test_mode", "0") == "1"
+    test_line = "\n🧪 ТЕСТОВЫЙ РЕЖИМ АКТИВЕН\n" if test_mode else "\n"
     await message.answer(
-        f"📊 Настройки:\n"
+        f"📊 Настройки:{test_line}"
         f"• Лимит: {limit}/день\n"
         f"• Часы: {start}:00 – {end}:00\n"
         f"• Канал: {CHANNEL_ID or '—'}\n"
@@ -165,6 +170,81 @@ async def cmd_set_hours(message: types.Message):
 async def cmd_moderate(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
         return
+    await start_moderation(force=True)
+
+
+@dp.message(Command("test_cycle"))
+async def cmd_test_cycle(message: types.Message):
+    """Тестовый режим: часы активности = сейчас до +1 час, лимит сбрасывается."""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+
+    # Сохраняем оригинальные настройки, если ещё не в тесте
+    if get_setting("test_mode", "0") != "1":
+        set_setting("orig_start_hour", get_setting("active_start_hour", "9"))
+        set_setting("orig_end_hour", get_setting("active_end_hour", "23"))
+        set_setting("orig_limit", get_setting("daily_limit", "5"))
+
+    now = datetime.now()
+    test_start = now.hour
+    test_end = min(now.hour + 1, 23)
+    if test_end <= test_start:
+        test_end = 23
+
+    set_setting("active_start_hour", test_start)
+    set_setting("active_end_hour", test_end)
+    set_setting("daily_limit", 20)  # запас, чтобы не блокировало
+    set_setting("test_mode", "1")
+
+    # Чистим расписание и пул
+    close_all_pending("expired")
+    clear_scheduled()
+    reset_scheduled_to_new()
+
+    await message.answer(
+        f"🧪 ТЕСТОВЫЙ РЕЖИМ ВКЛЮЧЁН\n"
+        f"• Часы: {test_start}:00 – {test_end}:00\n"
+        f"• Лимит: 20 (для теста)\n"
+        f"• Расписание очищено\n\n"
+        f"Запускаю модерацию. Жми ✅ — мем уйдёт в ближайший слот.\n"
+        f"После теста: /test_cycle_end"
+    )
+    await asyncio.sleep(1)
+    await start_moderation(force=True)
+
+
+@dp.message(Command("test_cycle_end"))
+async def cmd_test_cycle_end(message: types.Message):
+    """Выход из тестового режима: восстанавливает оригинальные настройки."""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+
+    if get_setting("test_mode", "0") != "1":
+        await message.answer("⚠️ Тестовый режим не активен.")
+        return
+
+    orig_start = get_setting("orig_start_hour", "9")
+    orig_end = get_setting("orig_end_hour", "23")
+    orig_limit = get_setting("orig_limit", "5")
+
+    set_setting("active_start_hour", orig_start)
+    set_setting("active_end_hour", orig_end)
+    set_setting("daily_limit", orig_limit)
+    set_setting("test_mode", "0")
+
+    # Чистим расписание, чтобы тестовые посты не попали в реальный день
+    close_all_pending("expired")
+    clear_scheduled()
+    reset_scheduled_to_new()
+
+    await message.answer(
+        f"✅ ТЕСТОВЫЙ РЕЖИМ ВЫКЛЮЧЕН\n"
+        f"• Часы: {orig_start}:00 – {orig_end}:00\n"
+        f"• Лимит: {orig_limit}/день\n"
+        f"• Расписание очищено\n\n"
+        f"Запускаю модерацию в обычном режиме..."
+    )
+    await asyncio.sleep(1)
     await start_moderation(force=True)
 
 
@@ -277,7 +357,6 @@ async def handle_callback(callback: types.CallbackQuery):
 
     data = callback.data
 
-    # --- Предложка ---
     if data.startswith("sug_approve:") or data.startswith("sug_reject:"):
         action, meme_id = data.split(":")
         meme_id = int(meme_id)
@@ -310,7 +389,6 @@ async def handle_callback(callback: types.CallbackQuery):
             await callback.answer("⏭ Ок")
         return
 
-    # --- Обычные ---
     action, pending_id = data.split(":")
     pending_id = int(pending_id)
 
@@ -363,7 +441,6 @@ async def handle_callback(callback: types.CallbackQuery):
         except:
             pass
 
-        # Считаем счётчик для даты слота, а не для сегодня
         slot_date = slot_time.date()
         slot_count = count_scheduled_for_date(slot_date)
         limit = get_limit()
@@ -456,7 +533,7 @@ def get_next_slot_with_gap():
 
 
 # ============================================================
-# МОДЕРАЦИЯ ИЗ ПАПКИ
+# МОДЕРАЦИЯ
 # ============================================================
 
 async def start_moderation(force: bool = False):
@@ -470,7 +547,10 @@ async def start_moderation(force: bool = False):
     if has_active_pending_for_meme(meme["id"]):
         return
 
+    test_mode = get_setting("test_mode", "0") == "1"
     caption = f"📸 {meme['filename']}"
+    if test_mode:
+        caption = f"🧪 {caption}"
 
     for admin_id in ADMIN_IDS:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[

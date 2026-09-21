@@ -48,6 +48,10 @@ def get_active_hours():
     return start, end
 
 
+def get_moderation_start_hour():
+    return int(get_setting("moderation_start_hour", get_active_hours()[0]))
+
+
 def get_today():
     return datetime.now().date()
 
@@ -74,6 +78,15 @@ def compute_sha1(file_path):
     return sha1.hexdigest()
 
 
+def is_moderation_time():
+    if get_setting("test_mode", "0") == "1":
+        return True
+    now_hour = datetime.now().hour
+    mod_start = get_moderation_start_hour()
+    active_start, active_end = get_active_hours()
+    return mod_start <= now_hour < active_end
+
+
 # ============================================================
 # КОМАНДЫ
 # ============================================================
@@ -85,6 +98,7 @@ async def cmd_start(message: types.Message):
         return
     limit = get_limit()
     start, end = get_active_hours()
+    mod_start = get_moderation_start_hour()
     today = get_today()
     tomorrow = today + timedelta(days=1)
     today_count = count_scheduled_for_date(today)
@@ -95,17 +109,17 @@ async def cmd_start(message: types.Message):
         f"{test_line}"
         f"🤖 Бот запущен!\n"
         f"📊 Лимит: {limit}/день\n"
-        f"🕐 Часы: {start}:00 – {end}:00\n"
+        f"🕐 Публикация: {start}:00 – {end}:00\n"
+        f"📥 Модерация с: {mod_start}:00\n"
         f"📅 Сегодня ({today.strftime('%d.%m')}): {today_count}/{limit}\n"
         f"📅 Завтра ({tomorrow.strftime('%d.%m')}): {tomorrow_count}/{limit}\n\n"
         f"/moderate — мем вручную\n"
         f"/status — статус\n"
         f"/set_limit N — лимит\n"
-        f"/set_hours X Y — часы\n"
-        f"/test_cycle — тест полного дня\n"
-        f"/test_cycle_end — выйти из теста\n"
-        f"/simulate_new_day — полный сброс\n"
-        f"/reset_moderation — сброс модерации"
+        f"/set_hours X Y — часы публикации\n"
+        f"/set_moderation_hour N — час начала модерации\n"
+        f"/test_cycle — тест\n"
+        f"/test_cycle_end — выход из теста"
     )
 
 
@@ -115,6 +129,7 @@ async def cmd_status(message: types.Message):
         return
     limit = get_limit()
     start, end = get_active_hours()
+    mod_start = get_moderation_start_hour()
     today = get_today()
     tomorrow = today + timedelta(days=1)
     today_count = count_scheduled_for_date(today)
@@ -126,7 +141,8 @@ async def cmd_status(message: types.Message):
     await message.answer(
         f"📊 Настройки:{test_line}"
         f"• Лимит: {limit}/день\n"
-        f"• Часы: {start}:00 – {end}:00\n"
+        f"• Публикация: {start}:00 – {end}:00\n"
+        f"• Модерация с: {mod_start}:00\n"
         f"• Канал: {CHANNEL_ID or '—'}\n"
         f"• Предложка: {SUGGESTION_CHAT_ID or '—'}\n\n"
         f"📅 Сегодня ({today.strftime('%d.%m')}): {today_count}/{limit}\n"
@@ -161,9 +177,23 @@ async def cmd_set_hours(message: types.Message):
             raise ValueError
         set_setting("active_start_hour", start)
         set_setting("active_end_hour", end)
-        await message.answer(f"✅ Часы: {start}:00 – {end}:00")
+        await message.answer(f"✅ Публикация: {start}:00 – {end}:00")
     except:
         await message.answer("❌ /set_hours 9 23")
+
+
+@dp.message(Command("set_moderation_hour"))
+async def cmd_set_moderation_hour(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    try:
+        n = int(message.text.split()[1])
+        if not (0 <= n <= 23):
+            raise ValueError
+        set_setting("moderation_start_hour", n)
+        await message.answer(f"✅ Модерация с: {n}:00")
+    except:
+        await message.answer("❌ /set_moderation_hour 9")
 
 
 @dp.message(Command("moderate"))
@@ -175,15 +205,14 @@ async def cmd_moderate(message: types.Message):
 
 @dp.message(Command("test_cycle"))
 async def cmd_test_cycle(message: types.Message):
-    """Тестовый режим: часы активности = сейчас до +1 час, лимит сбрасывается."""
     if message.from_user.id not in ADMIN_IDS:
         return
 
-    # Сохраняем оригинальные настройки, если ещё не в тесте
     if get_setting("test_mode", "0") != "1":
         set_setting("orig_start_hour", get_setting("active_start_hour", "9"))
         set_setting("orig_end_hour", get_setting("active_end_hour", "23"))
         set_setting("orig_limit", get_setting("daily_limit", "5"))
+        set_setting("orig_mod_start", get_setting("moderation_start_hour", "9"))
 
     now = datetime.now()
     test_start = now.hour
@@ -193,21 +222,20 @@ async def cmd_test_cycle(message: types.Message):
 
     set_setting("active_start_hour", test_start)
     set_setting("active_end_hour", test_end)
-    set_setting("daily_limit", 20)  # запас, чтобы не блокировало
+    set_setting("moderation_start_hour", test_start)
+    set_setting("daily_limit", 20)
     set_setting("test_mode", "1")
 
-    # Чистим расписание и пул
     close_all_pending("expired")
     clear_scheduled()
     reset_scheduled_to_new()
 
     await message.answer(
-        f"🧪 ТЕСТОВЫЙ РЕЖИМ ВКЛЮЧЁН\n"
-        f"• Часы: {test_start}:00 – {test_end}:00\n"
-        f"• Лимит: 20 (для теста)\n"
-        f"• Расписание очищено\n\n"
-        f"Запускаю модерацию. Жми ✅ — мем уйдёт в ближайший слот.\n"
-        f"После теста: /test_cycle_end"
+        f"🧪 ТЕСТ ВКЛЮЧЁН\n"
+        f"• Публикация: {test_start}:00 – {test_end}:00\n"
+        f"• Лимит: 20\n\n"
+        f"Жми ✅, мем уйдёт в ближайший слот.\n"
+        f"Выход: /test_cycle_end"
     )
     await asyncio.sleep(1)
     await start_moderation(force=True)
@@ -215,7 +243,6 @@ async def cmd_test_cycle(message: types.Message):
 
 @dp.message(Command("test_cycle_end"))
 async def cmd_test_cycle_end(message: types.Message):
-    """Выход из тестового режима: восстанавливает оригинальные настройки."""
     if message.from_user.id not in ADMIN_IDS:
         return
 
@@ -226,26 +253,33 @@ async def cmd_test_cycle_end(message: types.Message):
     orig_start = get_setting("orig_start_hour", "9")
     orig_end = get_setting("orig_end_hour", "23")
     orig_limit = get_setting("orig_limit", "5")
+    orig_mod_start = get_setting("orig_mod_start", "9")
 
     set_setting("active_start_hour", orig_start)
     set_setting("active_end_hour", orig_end)
+    set_setting("moderation_start_hour", orig_mod_start)
     set_setting("daily_limit", orig_limit)
     set_setting("test_mode", "0")
 
-    # Чистим расписание, чтобы тестовые посты не попали в реальный день
     close_all_pending("expired")
     clear_scheduled()
     reset_scheduled_to_new()
 
     await message.answer(
-        f"✅ ТЕСТОВЫЙ РЕЖИМ ВЫКЛЮЧЕН\n"
-        f"• Часы: {orig_start}:00 – {orig_end}:00\n"
+        f"✅ ТЕСТ ВЫКЛЮЧЕН\n"
+        f"• Публикация: {orig_start}:00 – {orig_end}:00\n"
+        f"• Модерация с: {orig_mod_start}:00\n"
         f"• Лимит: {orig_limit}/день\n"
         f"• Расписание очищено\n\n"
-        f"Запускаю модерацию в обычном режиме..."
+        f"Запускаю обычную модерацию..."
     )
     await asyncio.sleep(1)
-    await start_moderation(force=True)
+    if is_moderation_time():
+        await start_moderation(force=True)
+    else:
+        await message.answer(
+            f"💤 Сейчас не время модерации (до {orig_mod_start}:00)."
+        )
 
 
 @dp.message(Command("simulate_new_day"))
@@ -453,7 +487,8 @@ async def handle_callback(callback: types.CallbackQuery):
         await callback.answer("✅ В очереди!")
 
         await asyncio.sleep(1)
-        await start_moderation(force=True)
+        if is_moderation_time():
+            await start_moderation(force=True)
 
     elif action == "reject":
         mark_meme_skipped(meme_id)
@@ -486,7 +521,8 @@ async def handle_callback(callback: types.CallbackQuery):
         await bot.send_message(callback.from_user.id, "⏭ Пропущено")
         await callback.answer("⏭ Ок")
         await asyncio.sleep(1)
-        await start_moderation(force=True)
+        if is_moderation_time():
+            await start_moderation(force=True)
 
 
 # ============================================================
@@ -537,6 +573,9 @@ def get_next_slot_with_gap():
 # ============================================================
 
 async def start_moderation(force: bool = False):
+    if not force and not is_moderation_time():
+        return
+
     scan_memes_folder()
     meme = get_random_unposted_meme()
     if not meme:
@@ -589,19 +628,27 @@ async def start_moderation(force: bool = False):
 
 async def process_scheduled_posts():
     now = datetime.now()
-    start_hour, end_hour = get_active_hours()
-
-    if not (start_hour <= now.hour < end_hour):
-        return
-
-    if count_posted_today() >= get_limit():
-        return
 
     scheduled = get_pending_scheduled()
     if not scheduled:
         return
 
     item = scheduled[0]
+    try:
+        item_time = datetime.fromisoformat(item["scheduled_at"])
+    except:
+        mark_scheduled_posted(item["id"])
+        return
+
+    is_stale = (now - item_time) > timedelta(hours=2)
+
+    if not is_stale:
+        start_hour, end_hour = get_active_hours()
+        if not (start_hour <= now.hour < end_hour):
+            return
+        if count_posted_today() >= get_limit():
+            return
+
     if not CHANNEL_ID:
         return
 
@@ -624,6 +671,24 @@ async def process_scheduled_posts():
         logging.error(f"Ошибка публикации: {e}")
 
 
+async def auto_offer():
+    if not is_moderation_time():
+        return
+    for admin_id in ADMIN_IDS:
+        try:
+            from database import get_db
+            with get_db() as conn:
+                row = conn.execute(
+                    "SELECT id FROM pending_moderation WHERE chat_id = ? AND status = 'pending' LIMIT 1",
+                    (admin_id,)
+                ).fetchone()
+                if not row:
+                    await start_moderation(force=False)
+                    return
+        except Exception as e:
+            logging.error(f"auto_offer: {e}")
+
+
 async def cleanup_old_pending():
     grouped = get_old_pending_grouped(hours=1)
     for chat_id, items in grouped.items():
@@ -634,7 +699,7 @@ async def cleanup_old_pending():
                 except:
                     pass
             expire_pending(item["id"])
-    if grouped:
+    if grouped and is_moderation_time():
         await asyncio.sleep(1)
         await start_moderation(force=True)
 
@@ -671,13 +736,17 @@ async def main():
 
     scheduler.add_job(process_scheduled_posts, 'interval', minutes=1)
     scheduler.add_job(cleanup_old_pending, 'interval', minutes=5)
+    scheduler.add_job(auto_offer, 'interval', minutes=30)
     scheduler.add_job(daily_index, 'cron', hour=9, minute=0)
     scheduler.start()
 
     logging.info("Бот запущен.")
 
     await asyncio.sleep(3)
-    await start_moderation(force=True)
+    if is_moderation_time():
+        await start_moderation(force=True)
+    else:
+        logging.info(f"Вне времени модерации. Ждём {get_moderation_start_hour()}:00")
 
     await dp.start_polling(bot)
 

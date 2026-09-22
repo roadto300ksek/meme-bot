@@ -41,7 +41,6 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 ADMIN_IDS = [int(x.strip()) for x in os.getenv('ADMIN_IDS', '').split(',') if x.strip()]
 CHANNEL_ID = os.getenv('CHANNEL_ID', '')
-SUGGESTION_CHAT_ID = os.getenv('SUGGESTION_CHAT_ID', '')
 MEMES_PATH = os.getenv('MEMES_PATH', './memes')
 DEFAULT_LIMIT = int(os.getenv('DAILY_LIMIT', 5))
 
@@ -105,9 +104,19 @@ def is_moderation_time():
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    if message.from_user.id not in ADMIN_IDS:
-        await message.answer("⛔ Ты не админ!")
+    user_id = message.from_user.id
+
+    # Для не-админов: приветствие предложки
+    if user_id not in ADMIN_IDS:
+        await message.answer(
+            "👋 Привет!\n\n"
+            "Это бот мем-канала @meme359daily.\n"
+            "Кинь мне мем (фото, GIF или видео) — и я передам его админам на модерацию.\n\n"
+            "Если мем одобрят — он появится в канале!"
+        )
         return
+
+    # Для админов: полный статус
     limit = get_limit()
     start, end = get_active_hours()
     mod_start = get_moderation_start_hour()
@@ -156,8 +165,7 @@ async def cmd_status(message: types.Message):
         f"• Лимит: {limit}/день\n"
         f"• Публикация: {start}:00 – {end}:00\n"
         f"• Модерация с: {mod_start}:00\n"
-        f"• Канал: {CHANNEL_ID or '—'}\n"
-        f"• Предложка: {SUGGESTION_CHAT_ID or '—'}\n\n"
+        f"• Канал: {CHANNEL_ID or '—'}\n\n"
         f"📅 Сегодня ({today.strftime('%d.%m')}): {today_count}/{limit}\n"
         f"📅 Завтра ({tomorrow.strftime('%d.%m')}): {tomorrow_count}/{limit}\n"
         f"📤 Опубликовано сегодня: {posted_today}\n\n"
@@ -314,14 +322,15 @@ async def cmd_reset_moderation(message: types.Message):
 
 
 # ============================================================
-# ПРЕДЛОЖКА
+# ПРЕДЛОЖКА: любой юзер кидает мем в личку бота
 # ============================================================
 
-@dp.message(lambda m: SUGGESTION_CHAT_ID and (
-    str(m.chat.id) == str(SUGGESTION_CHAT_ID) or
-    (m.chat.username and f"@{m.chat.username}" == SUGGESTION_CHAT_ID)
+@dp.message(lambda m: (
+    m.from_user.id not in ADMIN_IDS and
+    (m.photo or m.animation or m.video)
 ))
-async def handle_suggestion(message: types.Message):
+async def handle_user_suggestion(message: types.Message):
+    """Не-админ кидает мем в личку боту — сохраняем и шлём админам на модерацию"""
     file_id = None
     file_ext = ".jpg"
 
@@ -344,26 +353,27 @@ async def handle_suggestion(message: types.Message):
         file_path = os.path.join(MEMES_PATH, filename)
         await bot.download_file(tg_file.file_path, file_path)
     except Exception as e:
-        logger.error(f"Ошибка скачивания из предложки: {e}")
+        logger.error(f"Ошибка скачивания от юзера: {e}")
+        await message.answer("❌ Не смог скачать мем. Попробуй ещё раз.")
         return
 
     sha1 = compute_sha1(file_path)
     existing = get_meme_by_sha1(sha1)
     if existing:
-        try:
-            await message.reply("⚠️ Такой мем уже есть.")
-        except:
-            pass
+        await message.answer("⚠️ Такой мем уже есть в базе. Попробуй другой.")
         os.remove(file_path)
         return
 
     meme_id = add_meme(filename, sha1, file_path, submitted_by=message.from_user.id)
     if not meme_id:
         os.remove(file_path)
+        await message.answer("❌ Ошибка сохранения. Попробуй ещё раз.")
         return
 
     user_name = message.from_user.full_name or f"id{message.from_user.id}"
+    user_link = f"@{message.from_user.username}" if message.from_user.username else f"id{message.from_user.id}"
 
+    # Отправляем всем админам
     for admin_id in ADMIN_IDS:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [
@@ -371,7 +381,7 @@ async def handle_suggestion(message: types.Message):
                 InlineKeyboardButton(text="❌ Пропустить", callback_data=f"sug_reject:{meme_id}")
             ]
         ])
-        caption = f"📥 Из предложки\nОт: {user_name}"
+        caption = f"📥 Мем от юзера\n👤 {user_name} ({user_link})"
         try:
             if file_ext == ".jpg":
                 await bot.send_photo(admin_id, FSInputFile(file_path), caption=caption, reply_markup=keyboard)
@@ -380,12 +390,21 @@ async def handle_suggestion(message: types.Message):
             else:
                 await bot.send_video(admin_id, FSInputFile(file_path), caption=caption, reply_markup=keyboard)
         except Exception as e:
-            logger.error(f"Не отправить {admin_id}: {e}")
+            logger.error(f"Не отправить админу {admin_id}: {e}")
 
-    try:
-        await message.reply("✅ На модерации!")
-    except:
-        pass
+    await message.answer("✅ Мем отправлен на модерацию! Если одобрят — появится в @meme359daily.")
+
+
+# Если не-админ кидает что-то другое (текст, стикер и т.п.)
+@dp.message(lambda m: m.from_user.id not in ADMIN_IDS and m.chat.type == "private")
+async def handle_user_other(message: types.Message):
+    # Пропускаем команды
+    if message.text and message.text.startswith("/"):
+        return
+    await message.answer(
+        "📩 Я принимаю только мемы (фото, GIF, видео).\n"
+        "Кинь картинку — и я передам админам."
+    )
 
 
 # ============================================================
@@ -400,6 +419,7 @@ async def handle_callback(callback: types.CallbackQuery):
 
     data = callback.data
 
+    # --- Кнопки из предложки ---
     if data.startswith("sug_approve:") or data.startswith("sug_reject:"):
         action, meme_id = data.split(":")
         meme_id = int(meme_id)
@@ -432,6 +452,7 @@ async def handle_callback(callback: types.CallbackQuery):
             await callback.answer("⏭ Ок")
         return
 
+    # --- Обычные кнопки ---
     action, pending_id = data.split(":")
     pending_id = int(pending_id)
 
@@ -630,7 +651,7 @@ async def start_moderation(force: bool = False):
 
 
 # ============================================================
-# ФОНОВЫЕ ЗАДАЧИ (с обработкой ошибок)
+# ФОНОВЫЕ ЗАДАЧИ
 # ============================================================
 
 async def process_scheduled_posts():
@@ -731,10 +752,6 @@ async def check_permissions():
                 logger.info(f"✅ Бот админ в {CHANNEL_ID}")
             else:
                 logger.error(f"⚠️ Бот НЕ админ в {CHANNEL_ID}")
-
-        if SUGGESTION_CHAT_ID:
-            chat = await bot.get_chat(SUGGESTION_CHAT_ID)
-            logger.info(f"✅ Предложка: {chat.title}")
     except Exception as e:
         logger.error(f"check_permissions ошибка: {e}")
 
@@ -751,7 +768,7 @@ async def main():
     scheduler.start()
 
     logger.info("=" * 50)
-    logger.info("Бот запущен.")
+    logger.info("Бот запущен. Личка бота = предложка.")
     logger.info("=" * 50)
 
     await asyncio.sleep(3)

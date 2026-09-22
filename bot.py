@@ -106,7 +106,6 @@ def is_moderation_time():
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
 
-    # Для не-админов: приветствие предложки
     if user_id not in ADMIN_IDS:
         await message.answer(
             "👋 Привет!\n\n"
@@ -116,7 +115,6 @@ async def cmd_start(message: types.Message):
         )
         return
 
-    # Для админов: полный статус
     limit = get_limit()
     start, end = get_active_hours()
     mod_start = get_moderation_start_hour()
@@ -134,7 +132,8 @@ async def cmd_start(message: types.Message):
         f"📥 Модерация с: {mod_start}:00\n"
         f"📅 Сегодня ({today.strftime('%d.%m')}): {today_count}/{limit}\n"
         f"📅 Завтра ({tomorrow.strftime('%d.%m')}): {tomorrow_count}/{limit}\n\n"
-        f"/moderate — мем вручную\n"
+        f"Можешь кинуть мем в личку — он уйдёт другим админам.\n\n"
+        f"/moderate — мем из папки вручную\n"
         f"/status — статус\n"
         f"/set_limit N — лимит\n"
         f"/set_hours X Y — часы публикации\n"
@@ -322,15 +321,15 @@ async def cmd_reset_moderation(message: types.Message):
 
 
 # ============================================================
-# ПРЕДЛОЖКА: любой юзер кидает мем в личку бота
+# ПРЕДЛОЖКА: ЛЮБОЙ (включая админов) кидает мем в личку бота
 # ============================================================
 
-@dp.message(lambda m: (
-    m.from_user.id not in ADMIN_IDS and
-    (m.photo or m.animation or m.video)
-))
-async def handle_user_suggestion(message: types.Message):
-    """Не-админ кидает мем в личку боту — сохраняем и шлём админам на модерацию"""
+@dp.message(lambda m: m.chat.type == "private" and (m.photo or m.animation or m.video))
+async def handle_suggestion(message: types.Message):
+    """Любой кидает мем в личку боту. Админам уходит на модерацию."""
+    sender_id = message.from_user.id
+    is_admin = sender_id in ADMIN_IDS
+
     file_id = None
     file_ext = ".jpg"
 
@@ -348,12 +347,12 @@ async def handle_user_suggestion(message: types.Message):
 
     try:
         tg_file = await bot.get_file(file_id)
-        filename = f"user_{message.from_user.id}_{uuid.uuid4().hex[:8]}{file_ext}"
+        filename = f"user_{sender_id}_{uuid.uuid4().hex[:8]}{file_ext}"
         os.makedirs(MEMES_PATH, exist_ok=True)
         file_path = os.path.join(MEMES_PATH, filename)
         await bot.download_file(tg_file.file_path, file_path)
     except Exception as e:
-        logger.error(f"Ошибка скачивания от юзера: {e}")
+        logger.error(f"Ошибка скачивания: {e}")
         await message.answer("❌ Не смог скачать мем. Попробуй ещё раз.")
         return
 
@@ -364,41 +363,57 @@ async def handle_user_suggestion(message: types.Message):
         os.remove(file_path)
         return
 
-    meme_id = add_meme(filename, sha1, file_path, submitted_by=message.from_user.id)
+    meme_id = add_meme(filename, sha1, file_path, submitted_by=sender_id)
     if not meme_id:
         os.remove(file_path)
         await message.answer("❌ Ошибка сохранения. Попробуй ещё раз.")
         return
 
-    user_name = message.from_user.full_name or f"id{message.from_user.id}"
-    user_link = f"@{message.from_user.username}" if message.from_user.username else f"id{message.from_user.id}"
+    sender_name = message.from_user.full_name or f"id{sender_id}"
+    sender_link = f"@{message.from_user.username}" if message.from_user.username else f"id{sender_id}"
 
-    # Отправляем всем админам
-    for admin_id in ADMIN_IDS:
+    # Кому отправлять: если админ — всем кроме него. Если не админ — всем админам.
+    if is_admin:
+        recipients = [a for a in ADMIN_IDS if a != sender_id]
+        if not recipients:
+            # Ты единственный админ — шлём тебе же (для теста)
+            recipients = ADMIN_IDS
+        header = f"📥 Мем от админа\n👤 {sender_name} ({sender_link})"
+    else:
+        recipients = ADMIN_IDS
+        header = f"📥 Мем от юзера\n👤 {sender_name} ({sender_link})"
+
+    sent_any = False
+    for admin_id in recipients:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [
                 InlineKeyboardButton(text="✅ В очередь", callback_data=f"sug_approve:{meme_id}"),
                 InlineKeyboardButton(text="❌ Пропустить", callback_data=f"sug_reject:{meme_id}")
             ]
         ])
-        caption = f"📥 Мем от юзера\n👤 {user_name} ({user_link})"
         try:
             if file_ext == ".jpg":
-                await bot.send_photo(admin_id, FSInputFile(file_path), caption=caption, reply_markup=keyboard)
+                await bot.send_photo(admin_id, FSInputFile(file_path), caption=header, reply_markup=keyboard)
             elif file_ext == ".gif":
-                await bot.send_animation(admin_id, FSInputFile(file_path), caption=caption, reply_markup=keyboard)
+                await bot.send_animation(admin_id, FSInputFile(file_path), caption=header, reply_markup=keyboard)
             else:
-                await bot.send_video(admin_id, FSInputFile(file_path), caption=caption, reply_markup=keyboard)
+                await bot.send_video(admin_id, FSInputFile(file_path), caption=header, reply_markup=keyboard)
+            sent_any = True
         except Exception as e:
             logger.error(f"Не отправить админу {admin_id}: {e}")
 
-    await message.answer("✅ Мем отправлен на модерацию! Если одобрят — появится в @meme359daily.")
+    if sent_any:
+        if is_admin:
+            await message.answer("✅ Мем ушёл другим админам на модерацию.")
+        else:
+            await message.answer("✅ Мем отправлен на модерацию! Если одобрят — появится в @meme359daily.")
+    else:
+        await message.answer("⚠️ Не смог отправить мем админам.")
 
 
-# Если не-админ кидает что-то другое (текст, стикер и т.п.)
-@dp.message(lambda m: m.from_user.id not in ADMIN_IDS and m.chat.type == "private")
+# Не-админ кидает что-то другое в личку (текст, стикер и т.п.)
+@dp.message(lambda m: m.chat.type == "private" and m.from_user.id not in ADMIN_IDS)
 async def handle_user_other(message: types.Message):
-    # Пропускаем команды
     if message.text and message.text.startswith("/"):
         return
     await message.answer(
@@ -597,7 +612,7 @@ def get_next_slot_with_gap():
 
 
 # ============================================================
-# МОДЕРАЦИЯ
+# МОДЕРАЦИЯ ИЗ ПАПКИ
 # ============================================================
 
 async def start_moderation(force: bool = False):
@@ -768,7 +783,7 @@ async def main():
     scheduler.start()
 
     logger.info("=" * 50)
-    logger.info("Бот запущен. Личка бота = предложка.")
+    logger.info("Бот запущен. Личка бота = предложка (для всех).")
     logger.info("=" * 50)
 
     await asyncio.sleep(3)

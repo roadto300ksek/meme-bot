@@ -34,7 +34,7 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 meme_id INTEGER,
                 chat_id INTEGER,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP,
                 status TEXT DEFAULT 'pending',
                 message_id INTEGER
             )
@@ -108,8 +108,9 @@ def get_random_unposted_meme():
 
 
 def mark_meme_posted(meme_id):
+    now_str = datetime.now().isoformat()
     with get_db() as conn:
-        conn.execute("UPDATE memes SET status = 'posted', posted_at = CURRENT_TIMESTAMP WHERE id = ?", (meme_id,))
+        conn.execute("UPDATE memes SET status = 'posted', posted_at = ? WHERE id = ?", (now_str, meme_id))
         conn.commit()
 
 
@@ -136,10 +137,11 @@ def has_active_pending_for_meme(meme_id):
 
 
 def create_pending(meme_id, chat_id, message_id=None):
+    now_str = datetime.now().isoformat()
     with get_db() as conn:
         cursor = conn.execute(
-            "INSERT INTO pending_moderation (meme_id, chat_id, message_id) VALUES (?, ?, ?)",
-            (meme_id, chat_id, message_id)
+            "INSERT INTO pending_moderation (meme_id, chat_id, message_id, created_at) VALUES (?, ?, ?, ?)",
+            (meme_id, chat_id, message_id, now_str)
         )
         conn.commit()
         return cursor.lastrowid
@@ -173,7 +175,6 @@ def close_all_pending(status="expired"):
 
 
 def get_old_pending_grouped(hours=1):
-    """Возвращает устаревшие pending (старше N часов). Время считаем в Python, не в SQL."""
     from datetime import timedelta
     cutoff = (datetime.now() - timedelta(hours=hours)).isoformat()
     with get_db() as conn:
@@ -208,7 +209,6 @@ def add_scheduled_post(meme_id, scheduled_at):
 
 
 def get_pending_scheduled():
-    """Опубликовать то, чьё время пришло. Сравниваем в Python, не в SQL."""
     now_iso = datetime.now().isoformat()
     with get_db() as conn:
         rows = conn.execute("""

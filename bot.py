@@ -2,8 +2,16 @@ import asyncio
 import hashlib
 import logging
 import os
+import time
 import uuid
 from datetime import datetime, timedelta
+
+# ============================================================
+# MSK ТОЛЬКО ДЛЯ ПРОЦЕССА БОТА. Сервер остаётся в UTC.
+# ============================================================
+os.environ['TZ'] = 'Europe/Moscow'
+time.tzset()
+
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -11,7 +19,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFil
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # ============================================================
-# ПУТИ И ЛОГИРОВАНИЕ (без хардкода)
+# ПУТИ И ЛОГИРОВАНИЕ
 # ============================================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, '.env'))
@@ -125,9 +133,11 @@ async def cmd_start(message: types.Message):
     tomorrow_count = count_scheduled_for_date(tomorrow)
     test_mode = get_setting("test_mode", "0") == "1"
     test_line = "🧪 ТЕСТОВЫЙ РЕЖИМ АКТИВЕН\n" if test_mode else ""
+    now_str = datetime.now().strftime('%H:%M:%S')
     await message.answer(
         f"{test_line}"
         f"🤖 Бот запущен!\n"
+        f"🕒 Сейчас: {now_str} MSK\n"
         f"📊 Лимит: {limit}/день\n"
         f"🕐 Публикация: {start}:00 – {end}:00\n"
         f"📥 Модерация с: {mod_start}:00\n"
@@ -160,8 +170,10 @@ async def cmd_status(message: types.Message):
     stats_text = "\n".join([f"  • {k}: {v}" for k, v in stats.items()]) or "  (пусто)"
     test_mode = get_setting("test_mode", "0") == "1"
     test_line = "\n🧪 ТЕСТОВЫЙ РЕЖИМ АКТИВЕН\n" if test_mode else "\n"
+    now_str = datetime.now().strftime('%H:%M:%S')
     await message.answer(
         f"📊 Настройки:{test_line}"
+        f"🕒 Сейчас: {now_str} MSK\n"
         f"• Лимит: {limit}/день\n"
         f"• Публикация: {start}:00 – {end}:00\n"
         f"• Модерация с: {mod_start}:00\n"
@@ -254,6 +266,7 @@ async def cmd_test_cycle(message: types.Message):
 
     await message.answer(
         f"🧪 ТЕСТ ВКЛЮЧЁН\n"
+        f"🕒 Сейчас: {now.strftime('%H:%M:%S')} MSK\n"
         f"• Публикация: {test_start}:00 – {test_end}:00\n"
         f"• Лимит: 20\n\n"
         f"Жми ✅, мем уйдёт в ближайший слот.\n"
@@ -322,7 +335,7 @@ async def cmd_reset_moderation(message: types.Message):
 
 
 # ============================================================
-# ПРЕДЛОЖКА: любой (включая админов) кидает мем в личку
+# ПРЕДЛОЖКА: ЛЮБОЙ (включая админов) кидает мем в личку
 # ============================================================
 
 @dp.message(lambda m: m.chat.type == "private" and (m.photo or m.animation or m.video))
@@ -777,8 +790,9 @@ async def main():
     scheduler.add_job(daily_index, 'cron', hour=9, minute=0)
     scheduler.start()
 
+    now_str = datetime.now().strftime('%H:%M:%S')
     logger.info("=" * 50)
-    logger.info("Бот запущен. Пути без хардкода. Таймзона MSK.")
+    logger.info(f"Бот запущен. Время: {now_str} MSK. Сервер в UTC.")
     logger.info("=" * 50)
 
     await asyncio.sleep(3)

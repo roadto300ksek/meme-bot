@@ -1,17 +1,30 @@
-# Секреты
+# СЕКРЕТЫ
 .env
 .env.local
 .env.*.local
 
-# База данных
+# ПАПКА С МЕМАМИ
+memes/
+memes_backup*/
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.mp4
+*.webm
+
+# БАЗА ДАННЫХ
 *.db
 *.sqlite
 *.sqlite3
+memes.db
 
-# Папка с мемами (опционально — если не хочешь хранить мемы в репозитории)
-# memes/
+# ЛОГИ
+*.log
+bot.log
+tests.log
 
-# Питоновские временные файлы
+# PYTHON
 __pycache__/
 *.pyc
 *.pyo
@@ -22,15 +35,26 @@ __pycache__/
 *.egg-info/
 dist/
 build/
-*.log
+*.whl
 
-# Виртуальное окружение
+# ВИРТУАЛЬНОЕ ОКРУЖЕНИЕ
 venv/
 env/
 .venv/
+ENV/
 
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
+
+# ОС
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ВРЕМЕННЫЕ
+*.tmp
+*.bak
+*~

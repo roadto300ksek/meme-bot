@@ -25,6 +25,19 @@ from database import (
 )
 from scanner import scan_memes_folder
 
+# ============================================================
+# ЛОГИРОВАНИЕ
+# ============================================================
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('/home/linus/meme-bot/bot.log', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 ADMIN_IDS = [int(x.strip()) for x in os.getenv('ADMIN_IDS', '').split(',') if x.strip()]
 CHANNEL_ID = os.getenv('CHANNEL_ID', '')
@@ -32,7 +45,6 @@ SUGGESTION_CHAT_ID = os.getenv('SUGGESTION_CHAT_ID', '')
 MEMES_PATH = os.getenv('MEMES_PATH', './memes')
 DEFAULT_LIMIT = int(os.getenv('DAILY_LIMIT', 5))
 
-logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 scheduler = AsyncIOScheduler()
@@ -134,6 +146,7 @@ async def cmd_status(message: types.Message):
     tomorrow = today + timedelta(days=1)
     today_count = count_scheduled_for_date(today)
     tomorrow_count = count_scheduled_for_date(tomorrow)
+    posted_today = count_posted_today()
     stats = get_memes_stats()
     stats_text = "\n".join([f"  • {k}: {v}" for k, v in stats.items()]) or "  (пусто)"
     test_mode = get_setting("test_mode", "0") == "1"
@@ -146,7 +159,8 @@ async def cmd_status(message: types.Message):
         f"• Канал: {CHANNEL_ID or '—'}\n"
         f"• Предложка: {SUGGESTION_CHAT_ID or '—'}\n\n"
         f"📅 Сегодня ({today.strftime('%d.%m')}): {today_count}/{limit}\n"
-        f"📅 Завтра ({tomorrow.strftime('%d.%m')}): {tomorrow_count}/{limit}\n\n"
+        f"📅 Завтра ({tomorrow.strftime('%d.%m')}): {tomorrow_count}/{limit}\n"
+        f"📤 Опубликовано сегодня: {posted_today}\n\n"
         f"📦 Мемы:\n{stats_text}"
     )
 
@@ -330,7 +344,7 @@ async def handle_suggestion(message: types.Message):
         file_path = os.path.join(MEMES_PATH, filename)
         await bot.download_file(tg_file.file_path, file_path)
     except Exception as e:
-        logging.error(f"Ошибка скачивания: {e}")
+        logger.error(f"Ошибка скачивания из предложки: {e}")
         return
 
     sha1 = compute_sha1(file_path)
@@ -366,7 +380,7 @@ async def handle_suggestion(message: types.Message):
             else:
                 await bot.send_video(admin_id, FSInputFile(file_path), caption=caption, reply_markup=keyboard)
         except Exception as e:
-            logging.error(f"Не отправить {admin_id}: {e}")
+            logger.error(f"Не отправить {admin_id}: {e}")
 
     try:
         await message.reply("✅ На модерации!")
@@ -481,7 +495,6 @@ async def handle_callback(callback: types.CallbackQuery):
         )
         await callback.answer("✅ В очереди!")
 
-        # Всегда предлагаем следующий — без проверки времени
         await asyncio.sleep(1)
         await start_moderation(force=True)
 
@@ -515,8 +528,6 @@ async def handle_callback(callback: types.CallbackQuery):
             pass
         await bot.send_message(callback.from_user.id, "⏭ Пропущено")
         await callback.answer("⏭ Ок")
-
-        # Всегда предлагаем следующий — без проверки времени
         await asyncio.sleep(1)
         await start_moderation(force=True)
 
@@ -615,45 +626,45 @@ async def start_moderation(force: bool = False):
                 reply_markup=keyboard
             )
         except Exception as e:
-            logging.error(f"Ошибка {admin_id}: {e}")
+            logger.error(f"Ошибка отправки {admin_id}: {e}")
 
 
 # ============================================================
-# ФОНОВЫЕ ЗАДАЧИ
+# ФОНОВЫЕ ЗАДАЧИ (с обработкой ошибок)
 # ============================================================
 
 async def process_scheduled_posts():
-    now = datetime.now()
-
-    scheduled = get_pending_scheduled()
-    if not scheduled:
-        return
-
-    item = scheduled[0]
     try:
-        item_time = datetime.fromisoformat(item["scheduled_at"])
-    except:
-        mark_scheduled_posted(item["id"])
-        return
+        now = datetime.now()
 
-    is_stale = (now - item_time) > timedelta(hours=2)
-
-    if not is_stale:
-        start_hour, end_hour = get_active_hours()
-        if not (start_hour <= now.hour < end_hour):
-            return
-        if count_posted_today() >= get_limit():
+        scheduled = get_pending_scheduled()
+        if not scheduled:
             return
 
-    if not CHANNEL_ID:
-        return
+        item = scheduled[0]
+        try:
+            item_time = datetime.fromisoformat(item["scheduled_at"])
+        except:
+            mark_scheduled_posted(item["id"])
+            return
 
-    file_path = get_meme_path(item["meme_id"])
-    if not file_path or not os.path.exists(file_path):
-        mark_scheduled_posted(item["id"])
-        return
+        is_stale = (now - item_time) > timedelta(hours=2)
 
-    try:
+        if not is_stale:
+            start_hour, end_hour = get_active_hours()
+            if not (start_hour <= now.hour < end_hour):
+                return
+            if count_posted_today() >= get_limit():
+                return
+
+        if not CHANNEL_ID:
+            return
+
+        file_path = get_meme_path(item["meme_id"])
+        if not file_path or not os.path.exists(file_path):
+            mark_scheduled_posted(item["id"])
+            return
+
         if file_path.endswith(".gif"):
             await bot.send_animation(CHANNEL_ID, FSInputFile(file_path))
         elif file_path.endswith(".mp4"):
@@ -662,17 +673,16 @@ async def process_scheduled_posts():
             await bot.send_photo(CHANNEL_ID, FSInputFile(file_path))
         mark_scheduled_posted(item["id"])
         mark_meme_posted(item["meme_id"])
-        logging.info(f"Опубликован мем {item['meme_id']}")
+        logger.info(f"Опубликован мем {item['meme_id']}")
     except Exception as e:
-        logging.error(f"Ошибка публикации: {e}")
+        logger.error(f"process_scheduled_posts ошибка: {e}", exc_info=True)
 
 
 async def auto_offer():
-    """Раз в 30 минут: если время модерации и у админа нет активных pending — прислать мем"""
-    if not is_moderation_time():
-        return
-    for admin_id in ADMIN_IDS:
-        try:
+    try:
+        if not is_moderation_time():
+            return
+        for admin_id in ADMIN_IDS:
             from database import get_db
             with get_db() as conn:
                 row = conn.execute(
@@ -682,48 +692,51 @@ async def auto_offer():
                 if not row:
                     await start_moderation(force=False)
                     return
-        except Exception as e:
-            logging.error(f"auto_offer: {e}")
+    except Exception as e:
+        logger.error(f"auto_offer ошибка: {e}", exc_info=True)
 
 
 async def cleanup_old_pending():
-    grouped = get_old_pending_grouped(hours=1)
-    for chat_id, items in grouped.items():
-        for item in items:
-            if item.get("message_id"):
-                try:
-                    await bot.delete_message(chat_id=item["chat_id"], message_id=item["message_id"])
-                except:
-                    pass
-            expire_pending(item["id"])
-    if grouped:
-        await asyncio.sleep(1)
-        await start_moderation(force=True)
+    try:
+        grouped = get_old_pending_grouped(hours=1)
+        for chat_id, items in grouped.items():
+            for item in items:
+                if item.get("message_id"):
+                    try:
+                        await bot.delete_message(chat_id=item["chat_id"], message_id=item["message_id"])
+                    except:
+                        pass
+                expire_pending(item["id"])
+        if grouped:
+            await asyncio.sleep(1)
+            await start_moderation(force=True)
+    except Exception as e:
+        logger.error(f"cleanup_old_pending ошибка: {e}", exc_info=True)
 
 
 async def daily_index():
-    count = scan_memes_folder()
-    logging.info(f"Индексация: {count}")
+    try:
+        count = scan_memes_folder()
+        logger.info(f"Индексация: {count}")
+    except Exception as e:
+        logger.error(f"daily_index ошибка: {e}", exc_info=True)
 
 
 async def check_permissions():
-    if CHANNEL_ID:
-        try:
+    try:
+        if CHANNEL_ID:
             me = await bot.get_me()
             member = await bot.get_chat_member(chat_id=CHANNEL_ID, user_id=me.id)
             if member.status in ("administrator", "creator"):
-                logging.info(f"✅ Бот админ в {CHANNEL_ID}")
+                logger.info(f"✅ Бот админ в {CHANNEL_ID}")
             else:
-                logging.error(f"⚠️ Бот НЕ админ в {CHANNEL_ID}")
-        except Exception as e:
-            logging.error(f"Ошибка канала: {e}")
+                logger.error(f"⚠️ Бот НЕ админ в {CHANNEL_ID}")
 
-    if SUGGESTION_CHAT_ID:
-        try:
+        if SUGGESTION_CHAT_ID:
             chat = await bot.get_chat(SUGGESTION_CHAT_ID)
-            logging.info(f"✅ Предложка: {chat.title}")
-        except Exception as e:
-            logging.error(f"⚠️ Предложка недоступна: {e}")
+            logger.info(f"✅ Предложка: {chat.title}")
+    except Exception as e:
+        logger.error(f"check_permissions ошибка: {e}")
 
 
 async def main():
@@ -737,13 +750,15 @@ async def main():
     scheduler.add_job(daily_index, 'cron', hour=9, minute=0)
     scheduler.start()
 
-    logging.info("Бот запущен.")
+    logger.info("=" * 50)
+    logger.info("Бот запущен.")
+    logger.info("=" * 50)
 
     await asyncio.sleep(3)
     if is_moderation_time():
         await start_moderation(force=True)
     else:
-        logging.info(f"Вне времени модерации. Ждём {get_moderation_start_hour()}:00")
+        logger.info(f"Вне времени модерации. Ждём {get_moderation_start_hour()}:00")
 
     await dp.start_polling(bot)
 

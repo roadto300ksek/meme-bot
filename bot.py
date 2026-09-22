@@ -10,9 +10,6 @@ from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-# ============================================================
-# ПУТИ И ЛОГИРОВАНИЕ
-# ============================================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, '.env'))
 
@@ -31,7 +28,7 @@ from database import (
     create_pending, close_pending, mark_meme_posted,
     mark_meme_skipped, get_meme_path, add_scheduled_post,
     get_pending_scheduled, mark_scheduled_posted, mark_meme_scheduled,
-    get_scheduled_for_date, expire_pending,
+    get_scheduled_for_date, count_all_for_date, expire_pending,
     has_active_pending_for_meme, get_pending_by_id,
     get_pendings_for_meme, close_all_pending,
     get_old_pending_grouped, get_memes_stats, add_meme, get_meme_by_sha1,
@@ -70,7 +67,8 @@ def get_today():
 
 
 def count_scheduled_for_date(d):
-    return len(get_scheduled_for_date(d.isoformat()))
+    """pending + posted на дату. Для отображения лимита."""
+    return count_all_for_date(d.isoformat())
 
 
 def day_label(d):
@@ -124,6 +122,7 @@ async def cmd_start(message: types.Message):
     tomorrow = today + timedelta(days=1)
     today_count = count_scheduled_for_date(today)
     tomorrow_count = count_scheduled_for_date(tomorrow)
+    posted_today = count_posted_today()
     test_mode = get_setting("test_mode", "0") == "1"
     test_line = "🧪 ТЕСТОВЫЙ РЕЖИМ АКТИВЕН\n" if test_mode else ""
     now_str = now().strftime('%H:%M:%S')
@@ -134,7 +133,7 @@ async def cmd_start(message: types.Message):
         f"📊 Лимит: {limit}/день\n"
         f"🕐 Публикация: {start}:00 – {end}:00\n"
         f"📥 Модерация с: {mod_start}:00\n"
-        f"📅 Сегодня ({today.strftime('%d.%m')}): {today_count}/{limit}\n"
+        f"📅 Сегодня ({today.strftime('%d.%m')}): {today_count}/{limit} (опубликовано: {posted_today})\n"
         f"📅 Завтра ({tomorrow.strftime('%d.%m')}): {tomorrow_count}/{limit}\n\n"
         f"Можешь кинуть мем в личку — он уйдёт другим админам.\n\n"
         f"/moderate — мем из папки вручную\n"
@@ -171,9 +170,8 @@ async def cmd_status(message: types.Message):
         f"• Публикация: {start}:00 – {end}:00\n"
         f"• Модерация с: {mod_start}:00\n"
         f"• Канал: {CHANNEL_ID or '—'}\n\n"
-        f"📅 Сегодня ({today.strftime('%d.%m')}): {today_count}/{limit}\n"
-        f"📅 Завтра ({tomorrow.strftime('%d.%m')}): {tomorrow_count}/{limit}\n"
-        f"📤 Опубликовано сегодня: {posted_today}\n\n"
+        f"📅 Сегодня ({today.strftime('%d.%m')}): {today_count}/{limit} (опубликовано: {posted_today})\n"
+        f"📅 Завтра ({tomorrow.strftime('%d.%m')}): {tomorrow_count}/{limit}\n\n"
         f"📦 Мемы:\n{stats_text}"
     )
 
@@ -242,7 +240,6 @@ async def cmd_test_cycle(message: types.Message):
         set_setting("orig_mod_start", get_setting("moderation_start_hour", "9"))
 
     n = now()
-    # Тестовое окно: текущий час – +2 часа. Слоты внутри пойдут с интервалом 2 минуты.
     test_start = n.hour
     test_end = min(n.hour + 2, 23)
     if test_end <= test_start:
@@ -449,7 +446,7 @@ async def handle_callback(callback: types.CallbackQuery):
                 return
             slot_time = get_next_slot_with_gap()
             if not slot_time:
-                await callback.answer("❌ Нет слотов!", show_alert=True)
+                await callback.answer("❌ Нет слотов на 2 недели вперёд!", show_alert=True)
                 return
             add_scheduled_post(meme_id, slot_time.isoformat())
             mark_meme_scheduled(meme_id)
@@ -491,7 +488,7 @@ async def handle_callback(callback: types.CallbackQuery):
             return
         slot_time = get_next_slot_with_gap()
         if not slot_time:
-            await callback.answer("❌ Нет слотов!", show_alert=True)
+            await callback.answer("❌ Нет слотов на 2 недели вперёд!", show_alert=True)
             return
 
         add_scheduled_post(meme_id, slot_time.isoformat())
@@ -572,7 +569,7 @@ async def handle_callback(callback: types.CallbackQuery):
 
 
 # ============================================================
-# АЛГОРИТМ СЛОТОВ
+# АЛГОРИТМ СЛОТОВ (ЛИМИТ = pending + posted)
 # ============================================================
 
 def get_next_slot_with_gap():
@@ -581,26 +578,26 @@ def get_next_slot_with_gap():
     n = now()
     test_mode = get_setting("test_mode", "0") == "1"
 
-    # В ТЕСТОВОМ РЕЖИМЕ: слоты идут с интервалом 2 минуты от текущего момента
     if test_mode:
         today = n.date()
         posts = get_scheduled_for_date(today.isoformat())
         idx = len(posts)
         slot = n + timedelta(minutes=2 * (idx + 1))
-        # Не выходим за пределы активных часов
         if slot.hour >= end_hour:
             slot = slot.replace(hour=end_hour - 1, minute=59, second=0, microsecond=0)
         if slot < n:
             slot = n + timedelta(minutes=1)
         return slot
 
-    # ОБЫЧНЫЙ РЕЖИМ: середина самого длинного промежутка
     for day_offset in range(0, 14):
         target_date = (n + timedelta(days=day_offset)).date()
         date_str = target_date.isoformat()
-        posts = get_scheduled_for_date(date_str)
-        if len(posts) >= limit:
+
+        # ЛИМИТ: pending + posted на дату
+        if count_all_for_date(date_str) >= limit:
             continue
+
+        posts = get_scheduled_for_date(date_str)
 
         day_start = datetime(target_date.year, target_date.month, target_date.day, start_hour, 0)
         day_end = datetime(target_date.year, target_date.month, target_date.day, end_hour, 0)
@@ -808,7 +805,7 @@ async def main():
 
     now_str = now().strftime('%H:%M:%S')
     logger.info("=" * 50)
-    logger.info(f"Бот запущен. Время: {now_str} MSK (сервер в UTC).")
+    logger.info(f"Бот запущен. Время: {now_str} MSK")
     logger.info("=" * 50)
 
     await asyncio.sleep(3)

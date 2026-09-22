@@ -7,7 +7,6 @@ DB_PATH = "memes.db"
 
 
 def now():
-    """Naive datetime в MSK (без tzinfo)."""
     return datetime.now(MSK).replace(tzinfo=None)
 
 
@@ -229,6 +228,7 @@ def mark_scheduled_posted(scheduled_id):
 
 
 def get_scheduled_for_date(date_str):
+    """Только pending — для построения промежутков."""
     with get_db() as conn:
         rows = conn.execute("""
             SELECT * FROM scheduled_posts
@@ -236,6 +236,16 @@ def get_scheduled_for_date(date_str):
             ORDER BY scheduled_at ASC
         """, (f"{date_str}%",)).fetchall()
         return [dict(row) for row in rows]
+
+
+def count_all_for_date(date_str):
+    """pending + posted на дату — для проверки лимита."""
+    with get_db() as conn:
+        row = conn.execute("""
+            SELECT COUNT(*) FROM scheduled_posts
+            WHERE status IN ('pending', 'posted') AND scheduled_at LIKE ?
+        """, (f"{date_str}%",)).fetchone()
+        return row[0] if row else 0
 
 
 def count_posted_today():

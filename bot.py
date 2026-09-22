@@ -274,12 +274,7 @@ async def cmd_test_cycle_end(message: types.Message):
         f"Запускаю обычную модерацию..."
     )
     await asyncio.sleep(1)
-    if is_moderation_time():
-        await start_moderation(force=True)
-    else:
-        await message.answer(
-            f"💤 Сейчас не время модерации (до {orig_mod_start}:00)."
-        )
+    await start_moderation(force=True)
 
 
 @dp.message(Command("simulate_new_day"))
@@ -486,9 +481,9 @@ async def handle_callback(callback: types.CallbackQuery):
         )
         await callback.answer("✅ В очереди!")
 
+        # Всегда предлагаем следующий — без проверки времени
         await asyncio.sleep(1)
-        if is_moderation_time():
-            await start_moderation(force=True)
+        await start_moderation(force=True)
 
     elif action == "reject":
         mark_meme_skipped(meme_id)
@@ -520,9 +515,10 @@ async def handle_callback(callback: types.CallbackQuery):
             pass
         await bot.send_message(callback.from_user.id, "⏭ Пропущено")
         await callback.answer("⏭ Ок")
+
+        # Всегда предлагаем следующий — без проверки времени
         await asyncio.sleep(1)
-        if is_moderation_time():
-            await start_moderation(force=True)
+        await start_moderation(force=True)
 
 
 # ============================================================
@@ -672,6 +668,7 @@ async def process_scheduled_posts():
 
 
 async def auto_offer():
+    """Раз в 30 минут: если время модерации и у админа нет активных pending — прислать мем"""
     if not is_moderation_time():
         return
     for admin_id in ADMIN_IDS:
@@ -699,7 +696,7 @@ async def cleanup_old_pending():
                 except:
                     pass
             expire_pending(item["id"])
-    if grouped and is_moderation_time():
+    if grouped:
         await asyncio.sleep(1)
         await start_moderation(force=True)
 

@@ -10,7 +10,21 @@ from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-load_dotenv('/home/linus/meme-bot/.env')
+# ============================================================
+# ПУТИ И ЛОГИРОВАНИЕ (без хардкода)
+# ============================================================
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(BASE_DIR, '.env'))
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(os.path.join(BASE_DIR, 'bot.log'), encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 from database import (
     init_db, get_setting, set_setting, get_random_unposted_meme,
@@ -25,23 +39,10 @@ from database import (
 )
 from scanner import scan_memes_folder
 
-# ============================================================
-# ЛОГИРОВАНИЕ
-# ============================================================
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('/home/linus/meme-bot/bot.log', encoding='utf-8'),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
-
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 ADMIN_IDS = [int(x.strip()) for x in os.getenv('ADMIN_IDS', '').split(',') if x.strip()]
 CHANNEL_ID = os.getenv('CHANNEL_ID', '')
-MEMES_PATH = os.getenv('MEMES_PATH', './memes')
+MEMES_PATH = os.getenv('MEMES_PATH', os.path.join(BASE_DIR, 'memes'))
 DEFAULT_LIMIT = int(os.getenv('DAILY_LIMIT', 5))
 
 bot = Bot(token=BOT_TOKEN)
@@ -321,12 +322,11 @@ async def cmd_reset_moderation(message: types.Message):
 
 
 # ============================================================
-# ПРЕДЛОЖКА: ЛЮБОЙ (включая админов) кидает мем в личку бота
+# ПРЕДЛОЖКА: любой (включая админов) кидает мем в личку
 # ============================================================
 
 @dp.message(lambda m: m.chat.type == "private" and (m.photo or m.animation or m.video))
 async def handle_suggestion(message: types.Message):
-    """Любой кидает мем в личку боту. Админам уходит на модерацию."""
     sender_id = message.from_user.id
     is_admin = sender_id in ADMIN_IDS
 
@@ -372,11 +372,9 @@ async def handle_suggestion(message: types.Message):
     sender_name = message.from_user.full_name or f"id{sender_id}"
     sender_link = f"@{message.from_user.username}" if message.from_user.username else f"id{sender_id}"
 
-    # Кому отправлять: если админ — всем кроме него. Если не админ — всем админам.
     if is_admin:
         recipients = [a for a in ADMIN_IDS if a != sender_id]
         if not recipients:
-            # Ты единственный админ — шлём тебе же (для теста)
             recipients = ADMIN_IDS
         header = f"📥 Мем от админа\n👤 {sender_name} ({sender_link})"
     else:
@@ -411,7 +409,6 @@ async def handle_suggestion(message: types.Message):
         await message.answer("⚠️ Не смог отправить мем админам.")
 
 
-# Не-админ кидает что-то другое в личку (текст, стикер и т.п.)
 @dp.message(lambda m: m.chat.type == "private" and m.from_user.id not in ADMIN_IDS)
 async def handle_user_other(message: types.Message):
     if message.text and message.text.startswith("/"):
@@ -434,7 +431,6 @@ async def handle_callback(callback: types.CallbackQuery):
 
     data = callback.data
 
-    # --- Кнопки из предложки ---
     if data.startswith("sug_approve:") or data.startswith("sug_reject:"):
         action, meme_id = data.split(":")
         meme_id = int(meme_id)
@@ -467,7 +463,6 @@ async def handle_callback(callback: types.CallbackQuery):
             await callback.answer("⏭ Ок")
         return
 
-    # --- Обычные кнопки ---
     action, pending_id = data.split(":")
     pending_id = int(pending_id)
 
@@ -783,7 +778,7 @@ async def main():
     scheduler.start()
 
     logger.info("=" * 50)
-    logger.info("Бот запущен. Личка бота = предложка (для всех).")
+    logger.info("Бот запущен. Пути без хардкода. Таймзона MSK.")
     logger.info("=" * 50)
 
     await asyncio.sleep(3)

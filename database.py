@@ -1,11 +1,14 @@
 import sqlite3
+from datetime import datetime
 
 DB_PATH = "memes.db"
+
 
 def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
 
 def init_db():
     with get_db() as conn:
@@ -122,30 +125,7 @@ def mark_meme_scheduled(meme_id):
         conn.commit()
 
 
-def has_active_pending_for_chat(chat_id):
-    """Есть ли у этого чата активный pending"""
-    with get_db() as conn:
-        row = conn.execute("""
-            SELECT id FROM pending_moderation
-            WHERE chat_id = ? AND status = 'pending'
-            LIMIT 1
-        """, (chat_id,)).fetchone()
-        return row is not None
-
-
-def has_any_active_pending():
-    """Есть ли хоть один активный pending вообще"""
-    with get_db() as conn:
-        row = conn.execute("""
-            SELECT id FROM pending_moderation
-            WHERE status = 'pending'
-            LIMIT 1
-        """).fetchone()
-        return row is not None
-
-
 def has_active_pending_for_meme(meme_id):
-    """Есть ли активный pending на этот мем"""
     with get_db() as conn:
         row = conn.execute("""
             SELECT id FROM pending_moderation
@@ -153,22 +133,6 @@ def has_active_pending_for_meme(meme_id):
             LIMIT 1
         """, (meme_id,)).fetchone()
         return row is not None
-
-
-def get_pending_by_id(pending_id):
-    with get_db() as conn:
-        row = conn.execute("SELECT * FROM pending_moderation WHERE id = ?", (pending_id,)).fetchone()
-        return dict(row) if row else None
-
-
-def get_pendings_for_meme(meme_id):
-    """Все pending на конкретный мем"""
-    with get_db() as conn:
-        rows = conn.execute("""
-            SELECT * FROM pending_moderation
-            WHERE meme_id = ? AND status = 'pending'
-        """, (meme_id,)).fetchall()
-        return [dict(row) for row in rows]
 
 
 def create_pending(meme_id, chat_id, message_id=None):
@@ -181,25 +145,24 @@ def create_pending(meme_id, chat_id, message_id=None):
         return cursor.lastrowid
 
 
+def get_pending_by_id(pending_id):
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM pending_moderation WHERE id = ?", (pending_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def get_pendings_for_meme(meme_id):
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT * FROM pending_moderation
+            WHERE meme_id = ? AND status = 'pending'
+        """, (meme_id,)).fetchall()
+        return [dict(row) for row in rows]
+
+
 def close_pending(pending_id, status):
     with get_db() as conn:
         conn.execute("UPDATE pending_moderation SET status = ? WHERE id = ?", (status, pending_id))
-        conn.commit()
-
-
-def close_pendings_for_meme(meme_id, except_id=None, status="expired"):
-    """Закрывает все pending на этот мем, кроме указанного"""
-    with get_db() as conn:
-        if except_id:
-            conn.execute("""
-                UPDATE pending_moderation SET status = ?
-                WHERE meme_id = ? AND status = 'pending' AND id != ?
-            """, (status, meme_id, except_id))
-        else:
-            conn.execute("""
-                UPDATE pending_moderation SET status = ?
-                WHERE meme_id = ? AND status = 'pending'
-            """, (status, meme_id))
         conn.commit()
 
 
@@ -210,12 +173,15 @@ def close_all_pending(status="expired"):
 
 
 def get_old_pending_grouped(hours=1):
+    """Возвращает устаревшие pending (старше N часов). Время считаем в Python, не в SQL."""
+    from datetime import timedelta
+    cutoff = (datetime.now() - timedelta(hours=hours)).isoformat()
     with get_db() as conn:
         rows = conn.execute("""
             SELECT * FROM pending_moderation
             WHERE status = 'pending'
-              AND created_at <= datetime('now', '-' || ? || ' hours')
-        """, (hours,)).fetchall()
+              AND created_at <= ?
+        """, (cutoff,)).fetchall()
         grouped = {}
         for row in rows:
             r = dict(row)
@@ -242,12 +208,14 @@ def add_scheduled_post(meme_id, scheduled_at):
 
 
 def get_pending_scheduled():
+    """Опубликовать то, чьё время пришло. Сравниваем в Python, не в SQL."""
+    now_iso = datetime.now().isoformat()
     with get_db() as conn:
         rows = conn.execute("""
             SELECT * FROM scheduled_posts
-            WHERE status = 'pending' AND scheduled_at <= CURRENT_TIMESTAMP
+            WHERE status = 'pending' AND scheduled_at <= ?
             ORDER BY scheduled_at ASC
-        """).fetchall()
+        """, (now_iso,)).fetchall()
         return [dict(row) for row in rows]
 
 
@@ -268,7 +236,6 @@ def get_scheduled_for_date(date_str):
 
 
 def count_posted_today():
-    from datetime import datetime
     today = datetime.now().date().isoformat()
     with get_db() as conn:
         row = conn.execute("""

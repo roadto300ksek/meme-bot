@@ -1,7 +1,14 @@
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
+MSK = ZoneInfo("Europe/Moscow")
 DB_PATH = "memes.db"
+
+
+def now():
+    """Naive datetime в MSK (без tzinfo)."""
+    return datetime.now(MSK).replace(tzinfo=None)
 
 
 def get_db():
@@ -108,9 +115,8 @@ def get_random_unposted_meme():
 
 
 def mark_meme_posted(meme_id):
-    now_str = datetime.now().isoformat()
     with get_db() as conn:
-        conn.execute("UPDATE memes SET status = 'posted', posted_at = ? WHERE id = ?", (now_str, meme_id))
+        conn.execute("UPDATE memes SET status = 'posted', posted_at = ? WHERE id = ?", (now().isoformat(), meme_id))
         conn.commit()
 
 
@@ -137,11 +143,10 @@ def has_active_pending_for_meme(meme_id):
 
 
 def create_pending(meme_id, chat_id, message_id=None):
-    now_str = datetime.now().isoformat()
     with get_db() as conn:
         cursor = conn.execute(
             "INSERT INTO pending_moderation (meme_id, chat_id, message_id, created_at) VALUES (?, ?, ?, ?)",
-            (meme_id, chat_id, message_id, now_str)
+            (meme_id, chat_id, message_id, now().isoformat())
         )
         conn.commit()
         return cursor.lastrowid
@@ -175,8 +180,7 @@ def close_all_pending(status="expired"):
 
 
 def get_old_pending_grouped(hours=1):
-    from datetime import timedelta
-    cutoff = (datetime.now() - timedelta(hours=hours)).isoformat()
+    cutoff = (now() - timedelta(hours=hours)).isoformat()
     with get_db() as conn:
         rows = conn.execute("""
             SELECT * FROM pending_moderation
@@ -209,13 +213,12 @@ def add_scheduled_post(meme_id, scheduled_at):
 
 
 def get_pending_scheduled():
-    now_iso = datetime.now().isoformat()
     with get_db() as conn:
         rows = conn.execute("""
             SELECT * FROM scheduled_posts
             WHERE status = 'pending' AND scheduled_at <= ?
             ORDER BY scheduled_at ASC
-        """, (now_iso,)).fetchall()
+        """, (now().isoformat(),)).fetchall()
         return [dict(row) for row in rows]
 
 
@@ -236,7 +239,7 @@ def get_scheduled_for_date(date_str):
 
 
 def count_posted_today():
-    today = datetime.now().date().isoformat()
+    today = now().date().isoformat()
     with get_db() as conn:
         row = conn.execute("""
             SELECT COUNT(*) FROM scheduled_posts

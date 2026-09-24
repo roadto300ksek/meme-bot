@@ -98,6 +98,17 @@ def is_moderation_time():
     return mod_start <= now_hour < active_end
 
 
+def has_free_slot():
+    """Проверяет, есть ли свободный слот в ближайшие 14 дней."""
+    limit = get_limit()
+    today = get_today()
+    for day_offset in range(0, 14):
+        d = today + timedelta(days=day_offset)
+        if count_scheduled_for_date(d) < limit:
+            return True
+    return False
+
+
 # ============================================================
 # КОМАНДЫ
 # ============================================================
@@ -126,6 +137,7 @@ async def cmd_start(message: types.Message):
     test_mode = get_setting("test_mode", "0") == "1"
     test_line = "🧪 ТЕСТОВЫЙ РЕЖИМ АКТИВЕН\n" if test_mode else ""
     now_str = now().strftime('%H:%M:%S')
+    free_line = "✅ Есть свободные слоты" if has_free_slot() else "🚫 Все слоты на 14 дней забиты"
     await message.answer(
         f"{test_line}"
         f"🤖 Бот запущен!\n"
@@ -134,7 +146,8 @@ async def cmd_start(message: types.Message):
         f"🕐 Публикация: {start}:00 – {end}:00\n"
         f"📥 Модерация с: {mod_start}:00\n"
         f"📅 Сегодня ({today.strftime('%d.%m')}): {today_count}/{limit} (опубликовано: {posted_today})\n"
-        f"📅 Завтра ({tomorrow.strftime('%d.%m')}): {tomorrow_count}/{limit}\n\n"
+        f"📅 Завтра ({tomorrow.strftime('%d.%m')}): {tomorrow_count}/{limit}\n"
+        f"{free_line}\n\n"
         f"Можешь кинуть мем в личку — он уйдёт другим админам.\n\n"
         f"/moderate — мем из папки вручную\n"
         f"/status — статус\n"
@@ -163,13 +176,15 @@ async def cmd_status(message: types.Message):
     test_mode = get_setting("test_mode", "0") == "1"
     test_line = "\n🧪 ТЕСТОВЫЙ РЕЖИМ АКТИВЕН\n" if test_mode else "\n"
     now_str = now().strftime('%H:%M:%S')
+    free_line = "✅ Есть свободные слоты" if has_free_slot() else "🚫 Все слоты на 14 дней забиты"
     await message.answer(
         f"📊 Настройки:{test_line}"
         f"🕒 Сейчас: {now_str} MSK\n"
         f"• Лимит: {limit}/день\n"
         f"• Публикация: {start}:00 – {end}:00\n"
         f"• Модерация с: {mod_start}:00\n"
-        f"• Канал: {CHANNEL_ID or '—'}\n\n"
+        f"• Канал: {CHANNEL_ID or '—'}\n"
+        f"• {free_line}\n\n"
         f"📅 Сегодня ({today.strftime('%d.%m')}): {today_count}/{limit} (опубликовано: {posted_today})\n"
         f"📅 Завтра ({tomorrow.strftime('%d.%m')}): {tomorrow_count}/{limit}\n\n"
         f"📦 Мемы:\n{stats_text}"
@@ -593,7 +608,6 @@ def get_next_slot_with_gap():
         target_date = (n + timedelta(days=day_offset)).date()
         date_str = target_date.isoformat()
 
-        # ЛИМИТ: pending + posted на дату
         if count_all_for_date(date_str) >= limit:
             continue
 
@@ -638,6 +652,13 @@ def get_next_slot_with_gap():
 
 async def start_moderation(force: bool = False):
     if not force and not is_moderation_time():
+        return
+
+    # Если все ближайшие 2 недели забиты — не предлагаем
+    if not has_free_slot():
+        if force:
+            for admin_id in ADMIN_IDS:
+                await bot.send_message(admin_id, "📅 Все слоты на 2 недели вперёд забиты. Мемы не предлагаю.")
         return
 
     scan_memes_folder()
@@ -738,6 +759,8 @@ async def process_scheduled_posts():
 async def auto_offer():
     try:
         if not is_moderation_time():
+            return
+        if not has_free_slot():
             return
         for admin_id in ADMIN_IDS:
             from database import get_db

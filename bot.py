@@ -67,7 +67,6 @@ def get_today():
 
 
 def count_scheduled_for_date(d):
-    """pending + posted на дату. Для отображения лимита."""
     return count_all_for_date(d.isoformat())
 
 
@@ -99,7 +98,6 @@ def is_moderation_time():
 
 
 def has_free_slot():
-    """Проверяет, есть ли свободный слот в ближайшие 14 дней."""
     limit = get_limit()
     today = get_today()
     for day_offset in range(0, 14):
@@ -148,7 +146,7 @@ async def cmd_start(message: types.Message):
         f"📅 Сегодня ({today.strftime('%d.%m')}): {today_count}/{limit} (опубликовано: {posted_today})\n"
         f"📅 Завтра ({tomorrow.strftime('%d.%m')}): {tomorrow_count}/{limit}\n"
         f"{free_line}\n\n"
-        f"Можешь кинуть мем в личку — он уйдёт другим админам.\n\n"
+        f"Кидай мем в личку — он попадёт в базу.\n\n"
         f"/moderate — мем из папки вручную\n"
         f"/status — статус\n"
         f"/set_limit N — лимит\n"
@@ -342,7 +340,8 @@ async def cmd_reset_moderation(message: types.Message):
 
 
 # ============================================================
-# ПРЕДЛОЖКА
+# ПРИЁМ МЕМОВ В ЛИЧКУ
+# Админ → просто в базу как new. Юзер → на модерацию.
 # ============================================================
 
 @dp.message(lambda m: m.chat.type == "private" and (m.photo or m.animation or m.video))
@@ -392,17 +391,22 @@ async def handle_suggestion(message: types.Message):
     sender_name = message.from_user.full_name or f"id{sender_id}"
     sender_link = f"@{message.from_user.username}" if message.from_user.username else f"id{sender_id}"
 
+    # --- АДМИН: просто в базу, никакой очереди ---
     if is_admin:
-        recipients = [a for a in ADMIN_IDS if a != sender_id]
-        if not recipients:
-            recipients = ADMIN_IDS
-        header = f"📥 Мем от админа\n👤 {sender_name} ({sender_link})"
-    else:
-        recipients = ADMIN_IDS
-        header = f"📥 Мем от юзера\n👤 {sender_name} ({sender_link})"
+        stats = get_memes_stats()
+        new_count = stats.get("new", 0)
+        await message.answer(
+            f"✅ Мем добавлен в базу\n"
+            f"📦 Всего в пуле: {new_count} новых\n\n"
+            f"Он будет предложен на модерацию в обычном порядке."
+        )
+        return
+
+    # --- ЮЗЕР: на модерацию админам ---
+    header = f"📥 Мем от юзера\n👤 {sender_name} ({sender_link})"
 
     sent_any = False
-    for admin_id in recipients:
+    for admin_id in ADMIN_IDS:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [
                 InlineKeyboardButton(text="✅ В очередь", callback_data=f"sug_approve:{meme_id}"),
@@ -421,10 +425,7 @@ async def handle_suggestion(message: types.Message):
             logger.error(f"Не отправить админу {admin_id}: {e}")
 
     if sent_any:
-        if is_admin:
-            await message.answer("✅ Мем ушёл другим админам на модерацию.")
-        else:
-            await message.answer("✅ Мем отправлен на модерацию! Если одобрят — появится в @meme359daily.")
+        await message.answer("✅ Мем отправлен на модерацию! Если одобрят — появится в @meme359daily.")
     else:
         await message.answer("⚠️ Не смог отправить мем админам.")
 
@@ -451,6 +452,7 @@ async def handle_callback(callback: types.CallbackQuery):
 
     data = callback.data
 
+    # --- Кнопки из предложки ---
     if data.startswith("sug_approve:") or data.startswith("sug_reject:"):
         action, meme_id = data.split(":")
         meme_id = int(meme_id)
@@ -483,6 +485,7 @@ async def handle_callback(callback: types.CallbackQuery):
             await callback.answer("⏭ Ок")
         return
 
+    # --- Обычные кнопки ---
     action, pending_id = data.split(":")
     pending_id = int(pending_id)
 
@@ -584,7 +587,7 @@ async def handle_callback(callback: types.CallbackQuery):
 
 
 # ============================================================
-# АЛГОРИТМ СЛОТОВ (ЛИМИТ = pending + posted)
+# АЛГОРИТМ СЛОТОВ
 # ============================================================
 
 def get_next_slot_with_gap():
@@ -654,7 +657,6 @@ async def start_moderation(force: bool = False):
     if not force and not is_moderation_time():
         return
 
-    # Если все ближайшие 2 недели забиты — не предлагаем
     if not has_free_slot():
         if force:
             for admin_id in ADMIN_IDS:

@@ -152,6 +152,17 @@ def has_active_pending_for_chat(chat_id):
         return row is not None
 
 
+def has_any_active_pending():
+    """Есть ли ХОТЬ ОДИН активный pending у любого админа."""
+    with get_db() as conn:
+        row = conn.execute("""
+            SELECT id FROM pending_moderation
+            WHERE status = 'pending'
+            LIMIT 1
+        """).fetchone()
+        return row is not None
+
+
 def create_pending(meme_id, chat_id, message_id=None):
     with get_db() as conn:
         cursor = conn.execute(

@@ -1,3 +1,4 @@
+
 import asyncio
 import hashlib
 import logging
@@ -30,6 +31,7 @@ from database import (
     get_pending_scheduled, mark_scheduled_posted, mark_meme_scheduled,
     get_scheduled_for_date, count_all_for_date, expire_pending,
     has_active_pending_for_meme, has_active_pending_for_chat,
+    has_any_active_pending,
     get_pending_by_id, get_pendings_for_meme, close_all_pending,
     get_old_pending_grouped, get_memes_stats, add_meme, get_meme_by_sha1,
     count_posted_today, clear_scheduled, reset_scheduled_to_new,
@@ -168,6 +170,7 @@ async def cmd_start(message: types.Message):
     test_line = "🧪 ТЕСТОВЫЙ РЕЖИМ АКТИВЕН\n" if test_mode else ""
     now_str = now().strftime('%H:%M:%S')
     free_line = "✅ Есть свободные слоты" if has_free_slot() else "🚫 Все слоты на 14 дней забиты"
+    pending_line = "⏳ Есть активный мем на модерации" if has_any_active_pending() else "✅ Модерация свободна"
     await message.answer(
         f"{test_line}"
         f"🤖 Бот запущен!\n"
@@ -177,7 +180,8 @@ async def cmd_start(message: types.Message):
         f"📥 Модерация с: {mod_start}:00\n"
         f"📅 Сегодня ({today.strftime('%d.%m')}): {today_count}/{limit} (опубликовано: {posted_today})\n"
         f"📅 Завтра ({tomorrow.strftime('%d.%m')}): {tomorrow_count}/{limit}\n"
-        f"{free_line}\n\n"
+        f"{free_line}\n"
+        f"{pending_line}\n\n"
         f"Автозадачи:\n"
         f"  • scan в {SCAN_HOUR:02d}:00\n"
         f"  • moderate в {MODERATE_HOUR:02d}:00\n\n"
@@ -210,6 +214,7 @@ async def cmd_status(message: types.Message):
     test_line = "\n🧪 ТЕСТОВЫЙ РЕЖИМ АКТИВЕН\n" if test_mode else "\n"
     now_str = now().strftime('%H:%M:%S')
     free_line = "✅ Есть свободные слоты" if has_free_slot() else "🚫 Все слоты на 14 дней забиты"
+    pending_line = "⏳ Есть активный мем на модерации" if has_any_active_pending() else "✅ Модерация свободна"
     await message.answer(
         f"📊 Настройки:{test_line}"
         f"🕒 Сейчас: {now_str} MSK\n"
@@ -218,6 +223,7 @@ async def cmd_status(message: types.Message):
         f"• Модерация с: {mod_start}:00\n"
         f"• Канал: {CHANNEL_ID or '—'}\n"
         f"• {free_line}\n"
+        f"• {pending_line}\n"
         f"• scan в {SCAN_HOUR:02d}:00, moderate в {MODERATE_HOUR:02d}:00\n\n"
         f"📅 Сегодня ({today.strftime('%d.%m')}): {today_count}/{limit} (опубликовано: {posted_today})\n"
         f"📅 Завтра ({tomorrow.strftime('%d.%m')}): {tomorrow_count}/{limit}\n\n"
@@ -695,6 +701,13 @@ async def start_moderation(force: bool = False):
     if not force and not is_moderation_time():
         return
 
+    # ЕСЛИ ЕСТЬ ХОТЬ ОДИН АКТИВНЫЙ PENDING — НЕ ПРЕДЛАГАЕМ НОВЫЙ
+    if has_any_active_pending():
+        if force:
+            for admin_id in ADMIN_IDS:
+                await bot.send_message(admin_id, "⏳ Уже есть активный мем на модерации. Прими решение по нему.")
+        return
+
     if not has_free_slot():
         if force:
             for admin_id in ADMIN_IDS:
@@ -716,13 +729,8 @@ async def start_moderation(force: bool = False):
     if test_mode:
         caption = f"🧪 {caption}"
 
-    # Отправляем ТОЛЬКО тем админам, у кого НЕТ активного pending
-    sent_to_any = False
+    # Отправляем ВСЕМ админам. Pending создаётся для каждого.
     for admin_id in ADMIN_IDS:
-        if has_active_pending_for_chat(admin_id):
-            logger.info(f"[MODERATE] У админа {admin_id} уже есть активный pending — пропускаем")
-            continue
-
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [
                 InlineKeyboardButton(text="✅ В очередь", callback_data="placeholder:0"),
@@ -749,13 +757,8 @@ async def start_moderation(force: bool = False):
                 message_id=sent.message_id,
                 reply_markup=keyboard
             )
-            sent_to_any = True
         except Exception as e:
             logger.error(f"Ошибка отправки {admin_id}: {e}")
-
-    if not sent_to_any and force:
-        # Всем либо уже отправлено, либо ошибки. Молчим.
-        pass
 
 
 # ============================================================
@@ -813,11 +816,9 @@ async def auto_offer():
             return
         if not has_free_slot():
             return
-        for admin_id in ADMIN_IDS:
-            if has_active_pending_for_chat(admin_id):
-                continue
-            await start_moderation(force=False)
+        if has_any_active_pending():
             return
+        await start_moderation(force=False)
     except Exception as e:
         logger.error(f"auto_offer ошибка: {e}", exc_info=True)
 

@@ -29,8 +29,8 @@ from database import (
     mark_meme_skipped, get_meme_path, add_scheduled_post,
     get_pending_scheduled, mark_scheduled_posted, mark_meme_scheduled,
     get_scheduled_for_date, count_all_for_date, expire_pending,
-    has_active_pending_for_meme, get_pending_by_id,
-    get_pendings_for_meme, close_all_pending,
+    has_active_pending_for_meme, has_active_pending_for_chat,
+    get_pending_by_id, get_pendings_for_meme, close_all_pending,
     get_old_pending_grouped, get_memes_stats, add_meme, get_meme_by_sha1,
     count_posted_today, clear_scheduled, reset_scheduled_to_new,
     now
@@ -110,18 +110,16 @@ def has_free_slot():
 
 
 # ============================================================
-# СЛУЖЕБНЫЕ ФУНКЦИИ (для таймера)
+# СЛУЖЕБНЫЕ ФУНКЦИИ
 # ============================================================
 
 async def do_scan():
-    """Сканирует папку memes/, добавляет новые файлы в базу."""
     count = scan_memes_folder()
     logger.info(f"[SCAN] Обработано файлов: {count}")
     return count
 
 
 async def do_moderate():
-    """Предлагает мемы на модерацию."""
     logger.info("[MODERATE] Автозапуск модерации")
     await start_moderation(force=True)
 
@@ -428,7 +426,6 @@ async def handle_suggestion(message: types.Message):
     sender_name = message.from_user.full_name or f"id{sender_id}"
     sender_link = f"@{message.from_user.username}" if message.from_user.username else f"id{sender_id}"
 
-    # --- АДМИН: просто в базу ---
     if is_admin:
         stats = get_memes_stats()
         new_count = stats.get("new", 0)
@@ -439,7 +436,6 @@ async def handle_suggestion(message: types.Message):
         )
         return
 
-    # --- ЮЗЕР: на модерацию (только в рабочее время) ---
     if not is_moderation_time():
         await message.answer(
             "✅ Мем сохранён!\n"
@@ -720,7 +716,13 @@ async def start_moderation(force: bool = False):
     if test_mode:
         caption = f"🧪 {caption}"
 
+    # Отправляем ТОЛЬКО тем админам, у кого НЕТ активного pending
+    sent_to_any = False
     for admin_id in ADMIN_IDS:
+        if has_active_pending_for_chat(admin_id):
+            logger.info(f"[MODERATE] У админа {admin_id} уже есть активный pending — пропускаем")
+            continue
+
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [
                 InlineKeyboardButton(text="✅ В очередь", callback_data="placeholder:0"),
@@ -747,8 +749,13 @@ async def start_moderation(force: bool = False):
                 message_id=sent.message_id,
                 reply_markup=keyboard
             )
+            sent_to_any = True
         except Exception as e:
             logger.error(f"Ошибка отправки {admin_id}: {e}")
+
+    if not sent_to_any and force:
+        # Всем либо уже отправлено, либо ошибки. Молчим.
+        pass
 
 
 # ============================================================
@@ -807,15 +814,10 @@ async def auto_offer():
         if not has_free_slot():
             return
         for admin_id in ADMIN_IDS:
-            from database import get_db
-            with get_db() as conn:
-                row = conn.execute(
-                    "SELECT id FROM pending_moderation WHERE chat_id = ? AND status = 'pending' LIMIT 1",
-                    (admin_id,)
-                ).fetchone()
-                if not row:
-                    await start_moderation(force=False)
-                    return
+            if has_active_pending_for_chat(admin_id):
+                continue
+            await start_moderation(force=False)
+            return
     except Exception as e:
         logger.error(f"auto_offer ошибка: {e}", exc_info=True)
 
@@ -856,12 +858,10 @@ async def main():
     await bot.delete_webhook(drop_pending_updates=True)
     await check_permissions()
 
-    # Фоновые задачи
     scheduler.add_job(process_scheduled_posts, 'interval', minutes=1)
     scheduler.add_job(cleanup_old_pending, 'interval', minutes=5)
     scheduler.add_job(auto_offer, 'interval', minutes=30)
 
-    # Ежедневные задачи (часы — из .env)
     scheduler.add_job(do_scan, 'cron', hour=SCAN_HOUR, minute=0, id='daily_scan')
     scheduler.add_job(do_moderate, 'cron', hour=MODERATE_HOUR, minute=0, id='daily_moderate')
 

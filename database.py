@@ -141,6 +141,17 @@ def has_active_pending_for_meme(meme_id):
         return row is not None
 
 
+def has_active_pending_for_chat(chat_id):
+    """Есть ли у этого чата активный pending."""
+    with get_db() as conn:
+        row = conn.execute("""
+            SELECT id FROM pending_moderation
+            WHERE chat_id = ? AND status = 'pending'
+            LIMIT 1
+        """, (chat_id,)).fetchone()
+        return row is not None
+
+
 def create_pending(meme_id, chat_id, message_id=None):
     with get_db() as conn:
         cursor = conn.execute(
@@ -228,7 +239,6 @@ def mark_scheduled_posted(scheduled_id):
 
 
 def get_scheduled_for_date(date_str):
-    """Только pending — для построения промежутков."""
     with get_db() as conn:
         rows = conn.execute("""
             SELECT * FROM scheduled_posts
@@ -239,7 +249,6 @@ def get_scheduled_for_date(date_str):
 
 
 def count_all_for_date(date_str):
-    """pending + posted на дату — для проверки лимита."""
     with get_db() as conn:
         row = conn.execute("""
             SELECT COUNT(*) FROM scheduled_posts

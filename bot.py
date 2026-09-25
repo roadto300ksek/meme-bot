@@ -42,6 +42,8 @@ ADMIN_IDS = [int(x.strip()) for x in os.getenv('ADMIN_IDS', '').split(',') if x.
 CHANNEL_ID = os.getenv('CHANNEL_ID', '')
 MEMES_PATH = os.getenv('MEMES_PATH', os.path.join(BASE_DIR, 'memes'))
 DEFAULT_LIMIT = int(os.getenv('DAILY_LIMIT', 5))
+SCAN_HOUR = int(os.getenv('SCAN_HOUR', 0))
+MODERATE_HOUR = int(os.getenv('MODERATE_HOUR', 9))
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -108,8 +110,40 @@ def has_free_slot():
 
 
 # ============================================================
+# СЛУЖЕБНЫЕ ФУНКЦИИ (для таймера)
+# ============================================================
+
+async def do_scan():
+    """Сканирует папку memes/, добавляет новые файлы в базу."""
+    count = scan_memes_folder()
+    logger.info(f"[SCAN] Обработано файлов: {count}")
+    return count
+
+
+async def do_moderate():
+    """Предлагает мемы на модерацию."""
+    logger.info("[MODERATE] Автозапуск модерации")
+    await start_moderation(force=True)
+
+
+# ============================================================
 # КОМАНДЫ
 # ============================================================
+
+@dp.message(Command("scan"))
+async def cmd_scan(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    await message.answer("🔄 Сканирую папку memes/...")
+    count = await do_scan()
+    stats = get_memes_stats()
+    stats_text = "\n".join([f"  • {k}: {v}" for k, v in stats.items()])
+    await message.answer(
+        f"✅ Скан завершён\n"
+        f"📂 Обработано файлов: {count}\n\n"
+        f"📦 Мемы в базе:\n{stats_text}"
+    )
+
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
@@ -146,8 +180,11 @@ async def cmd_start(message: types.Message):
         f"📅 Сегодня ({today.strftime('%d.%m')}): {today_count}/{limit} (опубликовано: {posted_today})\n"
         f"📅 Завтра ({tomorrow.strftime('%d.%m')}): {tomorrow_count}/{limit}\n"
         f"{free_line}\n\n"
-        f"Кидай мем в личку — он попадёт в базу.\n\n"
-        f"/moderate — мем из папки вручную\n"
+        f"Автозадачи:\n"
+        f"  • scan в {SCAN_HOUR:02d}:00\n"
+        f"  • moderate в {MODERATE_HOUR:02d}:00\n\n"
+        f"/scan — просканировать папку memes\n"
+        f"/moderate — предложить мем вручную\n"
         f"/status — статус\n"
         f"/set_limit N — лимит\n"
         f"/set_hours X Y — часы публикации\n"
@@ -182,7 +219,8 @@ async def cmd_status(message: types.Message):
         f"• Публикация: {start}:00 – {end}:00\n"
         f"• Модерация с: {mod_start}:00\n"
         f"• Канал: {CHANNEL_ID or '—'}\n"
-        f"• {free_line}\n\n"
+        f"• {free_line}\n"
+        f"• scan в {SCAN_HOUR:02d}:00, moderate в {MODERATE_HOUR:02d}:00\n\n"
         f"📅 Сегодня ({today.strftime('%d.%m')}): {today_count}/{limit} (опубликовано: {posted_today})\n"
         f"📅 Завтра ({tomorrow.strftime('%d.%m')}): {tomorrow_count}/{limit}\n\n"
         f"📦 Мемы:\n{stats_text}"
@@ -341,7 +379,6 @@ async def cmd_reset_moderation(message: types.Message):
 
 # ============================================================
 # ПРИЁМ МЕМОВ В ЛИЧКУ
-# Админ → просто в базу как new. Юзер → на модерацию.
 # ============================================================
 
 @dp.message(lambda m: m.chat.type == "private" and (m.photo or m.animation or m.video))
@@ -391,7 +428,7 @@ async def handle_suggestion(message: types.Message):
     sender_name = message.from_user.full_name or f"id{sender_id}"
     sender_link = f"@{message.from_user.username}" if message.from_user.username else f"id{sender_id}"
 
-    # --- АДМИН: просто в базу, никакой очереди ---
+    # --- АДМИН: просто в базу ---
     if is_admin:
         stats = get_memes_stats()
         new_count = stats.get("new", 0)
@@ -402,7 +439,14 @@ async def handle_suggestion(message: types.Message):
         )
         return
 
-    # --- ЮЗЕР: на модерацию админам ---
+    # --- ЮЗЕР: на модерацию (только в рабочее время) ---
+    if not is_moderation_time():
+        await message.answer(
+            "✅ Мем сохранён!\n"
+            f"🕐 Сейчас не время модерации. Он будет рассмотрен с {get_moderation_start_hour()}:00."
+        )
+        return
+
     header = f"📥 Мем от юзера\n👤 {sender_name} ({sender_link})"
 
     sent_any = False
@@ -452,7 +496,6 @@ async def handle_callback(callback: types.CallbackQuery):
 
     data = callback.data
 
-    # --- Кнопки из предложки ---
     if data.startswith("sug_approve:") or data.startswith("sug_reject:"):
         action, meme_id = data.split(":")
         meme_id = int(meme_id)
@@ -485,7 +528,6 @@ async def handle_callback(callback: types.CallbackQuery):
             await callback.answer("⏭ Ок")
         return
 
-    # --- Обычные кнопки ---
     action, pending_id = data.split(":")
     pending_id = int(pending_id)
 
@@ -796,14 +838,6 @@ async def cleanup_old_pending():
         logger.error(f"cleanup_old_pending ошибка: {e}", exc_info=True)
 
 
-async def daily_index():
-    try:
-        count = scan_memes_folder()
-        logger.info(f"Индексация: {count}")
-    except Exception as e:
-        logger.error(f"daily_index ошибка: {e}", exc_info=True)
-
-
 async def check_permissions():
     try:
         if CHANNEL_ID:
@@ -822,15 +856,21 @@ async def main():
     await bot.delete_webhook(drop_pending_updates=True)
     await check_permissions()
 
+    # Фоновые задачи
     scheduler.add_job(process_scheduled_posts, 'interval', minutes=1)
     scheduler.add_job(cleanup_old_pending, 'interval', minutes=5)
     scheduler.add_job(auto_offer, 'interval', minutes=30)
-    scheduler.add_job(daily_index, 'cron', hour=9, minute=0)
+
+    # Ежедневные задачи (часы — из .env)
+    scheduler.add_job(do_scan, 'cron', hour=SCAN_HOUR, minute=0, id='daily_scan')
+    scheduler.add_job(do_moderate, 'cron', hour=MODERATE_HOUR, minute=0, id='daily_moderate')
+
     scheduler.start()
 
     now_str = now().strftime('%H:%M:%S')
     logger.info("=" * 50)
     logger.info(f"Бот запущен. Время: {now_str} MSK")
+    logger.info(f"Расписание: scan в {SCAN_HOUR:02d}:00, moderate в {MODERATE_HOUR:02d}:00")
     logger.info("=" * 50)
 
     await asyncio.sleep(3)

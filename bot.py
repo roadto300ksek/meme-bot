@@ -1,4 +1,3 @@
-
 import asyncio
 import hashlib
 import logging
@@ -432,6 +431,7 @@ async def handle_suggestion(message: types.Message):
     sender_name = message.from_user.full_name or f"id{sender_id}"
     sender_link = f"@{message.from_user.username}" if message.from_user.username else f"id{sender_id}"
 
+    # --- АДМИН: просто в базу ---
     if is_admin:
         stats = get_memes_stats()
         new_count = stats.get("new", 0)
@@ -442,10 +442,19 @@ async def handle_suggestion(message: types.Message):
         )
         return
 
+    # --- ЮЗЕР: проверяем время и активный pending ---
     if not is_moderation_time():
         await message.answer(
             "✅ Мем сохранён!\n"
             f"🕐 Сейчас не время модерации. Он будет рассмотрен с {get_moderation_start_hour()}:00."
+        )
+        return
+
+    # Если уже есть активный pending — не отправляем, ждём
+    if has_any_active_pending():
+        await message.answer(
+            "✅ Мем сохранён!\n"
+            "⏳ Сейчас уже есть мем на модерации. Твой будет рассмотрен после."
         )
         return
 
@@ -528,6 +537,11 @@ async def handle_callback(callback: types.CallbackQuery):
             except:
                 pass
             await callback.answer("⏭ Ок")
+
+        # После решения по юзерскому мему — проверим, нет ли ещё pending
+        await asyncio.sleep(1)
+        if not has_any_active_pending():
+            await start_moderation(force=True)
         return
 
     action, pending_id = data.split(":")
@@ -594,7 +608,8 @@ async def handle_callback(callback: types.CallbackQuery):
         await callback.answer("✅ В очереди!")
 
         await asyncio.sleep(1)
-        await start_moderation(force=True)
+        if not has_any_active_pending():
+            await start_moderation(force=True)
 
     elif action == "reject":
         mark_meme_skipped(meme_id)
@@ -627,7 +642,8 @@ async def handle_callback(callback: types.CallbackQuery):
         await bot.send_message(callback.from_user.id, "⏭ Пропущено")
         await callback.answer("⏭ Ок")
         await asyncio.sleep(1)
-        await start_moderation(force=True)
+        if not has_any_active_pending():
+            await start_moderation(force=True)
 
 
 # ============================================================
@@ -729,7 +745,6 @@ async def start_moderation(force: bool = False):
     if test_mode:
         caption = f"🧪 {caption}"
 
-    # Отправляем ВСЕМ админам. Pending создаётся для каждого.
     for admin_id in ADMIN_IDS:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [
@@ -836,7 +851,8 @@ async def cleanup_old_pending():
                 expire_pending(item["id"])
         if grouped:
             await asyncio.sleep(1)
-            await start_moderation(force=True)
+            if not has_any_active_pending():
+                await start_moderation(force=True)
     except Exception as e:
         logger.error(f"cleanup_old_pending ошибка: {e}", exc_info=True)
 
@@ -875,10 +891,10 @@ async def main():
     logger.info("=" * 50)
 
     await asyncio.sleep(3)
-    if is_moderation_time():
+    if is_moderation_time() and not has_any_active_pending():
         await start_moderation(force=True)
     else:
-        logger.info(f"Вне времени модерации. Ждём {get_moderation_start_hour()}:00")
+        logger.info(f"Вне времени модерации или есть pending. Ждём.")
 
     await dp.start_polling(bot)
 

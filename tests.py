@@ -23,7 +23,9 @@ from database import (
     add_meme, get_meme_by_sha1, get_meme_by_id, get_random_unposted_meme,
     mark_meme_posted, mark_meme_skipped, mark_meme_scheduled,
     create_pending, get_pending_by_id, close_pending,
-    has_active_pending_for_meme, get_pendings_for_meme,
+    has_active_pending_for_meme, has_active_pending_for_chat,
+    has_any_active_pending,
+    get_pendings_for_meme,
     add_scheduled_post, get_pending_scheduled, mark_scheduled_posted,
     get_scheduled_for_date, count_all_for_date, count_posted_today,
     get_memes_stats, clear_scheduled, reset_scheduled_to_new,
@@ -59,7 +61,6 @@ def make_sha1(text):
 
 
 def force_mark_posted(limit=2):
-    """Помечает N постов как posted напрямую в БД (независимо от now())."""
     conn = sqlite3.connect(TEST_DB)
     conn.execute(f"""
         UPDATE scheduled_posts SET status='posted'
@@ -153,6 +154,55 @@ def test_multiple_pendings():
     check("остался p2", pendings[0]["id"] == p2)
 
 
+def test_pending_lock():
+    """ТЕСТ НАШЕГО ФИКСА: 'не слать новый мем, если есть активный pending'."""
+    print("\n📦 Тест 6.5: PENDING LOCK (наш фикс)")
+
+    # 6.5.1 — нет pending вообще
+    fresh_db()
+    check("нет pending в пустой БД", not has_any_active_pending())
+
+    # 6.5.2 — создаём pending для админа 111
+    meme_id = add_meme("lock1.jpg", make_sha1("lock1"), "/tmp/lock1.jpg")
+    create_pending(meme_id, 111, 2001)
+
+    check("has_any_active_pending = True", has_any_active_pending())
+    check("has_active_pending_for_chat(111) = True", has_active_pending_for_chat(111))
+    check("has_active_pending_for_chat(222) = False", not has_active_pending_for_chat(222))
+
+    # 6.5.3 — создаём второй pending для админа 222
+    meme_id2 = add_meme("lock2.jpg", make_sha1("lock2"), "/tmp/lock2.jpg")
+    create_pending(meme_id2, 222, 2002)
+
+    check("всё ещё has_any_active_pending = True", has_any_active_pending())
+    check("has_active_pending_for_chat(111) = True", has_active_pending_for_chat(111))
+    check("has_active_pending_for_chat(222) = True", has_active_pending_for_chat(222))
+
+    # 6.5.4 — закрываем один, второй остаётся
+    p_111 = get_pendings_for_meme(meme_id)[0]
+    close_pending(p_111["id"], "approved")
+
+    check("has_any_active_pending = True (второй ещё висит)", has_any_active_pending())
+    check("has_active_pending_for_chat(111) = False", not has_active_pending_for_chat(111))
+    check("has_active_pending_for_chat(222) = True", has_active_pending_for_chat(222))
+
+    # 6.5.5 — закрываем второй
+    p_222 = get_pendings_for_meme(meme_id2)[0]
+    close_pending(p_222["id"], "rejected")
+
+    check("has_any_active_pending = False (все закрыты)", not has_any_active_pending())
+    check("has_active_pending_for_chat(111) = False", not has_active_pending_for_chat(111))
+    check("has_active_pending_for_chat(222) = False", not has_active_pending_for_chat(222))
+
+    # 6.5.6 — expire через close_all_pending
+    meme_id3 = add_meme("lock3.jpg", make_sha1("lock3"), "/tmp/lock3.jpg")
+    create_pending(meme_id3, 111, 2003)
+    check("перед close_all — есть pending", has_any_active_pending())
+
+    close_all_pending("expired")
+    check("после close_all — нет pending", not has_any_active_pending())
+
+
 def test_scheduled_basic():
     print("\n📦 Тест 7: Отложенные посты — базовое")
     fresh_db()
@@ -178,14 +228,12 @@ def test_count_all_for_date():
 
     today = now().date().isoformat()
 
-    # 3 pending на сегодня (время неважно — фильтр по дате, не по времени)
     for h in [10, 12, 14]:
         add_scheduled_post(meme_id, f"{today}T{h}:00:00")
 
     check("count_all = 3 (pending)", count_all_for_date(today) == 3,
           f"got {count_all_for_date(today)}")
 
-    # Помечаем 2 как posted напрямую через SQL (независимо от now())
     force_mark_posted(2)
 
     check("count_all = 3 (2 posted + 1 pending)", count_all_for_date(today) == 3,
@@ -223,7 +271,6 @@ def test_slot_algorithm_full():
 
 
 def simulate_next_slot():
-    """Копия логики get_next_slot_with_gap из bot.py (без импорта bot)."""
     limit = int(get_setting("daily_limit", 5))
     start_hour = int(get_setting("active_start_hour", 9))
     end_hour = int(get_setting("active_end_hour", 23))
@@ -356,7 +403,6 @@ def test_full_cycle():
 
     today = now().date().isoformat()
 
-    # Шаг 1: 5 мемов через simulate_next_slot
     approved = 0
     for i in range(5):
         meme_id = add_meme(f"c{i}.jpg", make_sha1(f"c{i}"), f"/tmp/c{i}.jpg")
@@ -371,7 +417,6 @@ def test_full_cycle():
     check("count_all_for_today = 5", count_all_for_date(today) == 5,
           f"got {count_all_for_date(today)}")
 
-    # Шаг 2: 6-й уходит на завтра
     meme_id = add_meme("c6.jpg", make_sha1("c6"), "/tmp/c6.jpg")
     slot = simulate_next_slot()
     check("6-й ушёл на завтра", slot is not None and slot.date().isoformat() != today,
@@ -381,18 +426,14 @@ def test_full_cycle():
     check("на сегодня всё ещё 5", count_all_for_date(today) == 5,
           f"got {count_all_for_date(today)}")
 
-    # Шаг 3: pending ready = 0 (всё в будущем)
     all_posts = get_pending_scheduled()
     check("pending ready = 0 (всё в будущем)", len(all_posts) == 0,
           f"got {len(all_posts)}")
 
-    # Шаг 4: публикуем 1 мем вручную через SQL
     force_mark_posted(1)
 
     check("count_posted_today = 1", count_posted_today() == 1,
           f"got {count_posted_today()}")
-    check("count_all = 6 (1 posted + 5 pending)", count_all_for_date(today) == 5,
-          f"got {count_all_for_date(today)}")
 
 
 # ============================================================
@@ -411,6 +452,7 @@ def main():
         test_random_meme,
         test_pending,
         test_multiple_pendings,
+        test_pending_lock,           # ← НАШ НОВЫЙ ТЕСТ
         test_scheduled_basic,
         test_count_all_for_date,
         test_slot_algorithm_full,

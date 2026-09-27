@@ -30,7 +30,7 @@ from database import (
     get_pending_scheduled, mark_scheduled_posted, mark_meme_scheduled,
     get_scheduled_for_date, count_all_for_date, expire_pending,
     has_active_pending_for_meme, has_active_pending_for_chat,
-    has_any_active_pending,
+    has_any_active_pending, auto_cleanup_stale_pendings,
     get_pending_by_id, get_pendings_for_meme, close_all_pending,
     get_old_pending_grouped, get_memes_stats, add_meme, get_meme_by_sha1,
     count_posted_today, clear_scheduled, reset_scheduled_to_new,
@@ -110,8 +110,13 @@ def has_free_slot():
     return False
 
 
+def today_is_full():
+    """На сегодня лимит набран?"""
+    return count_scheduled_for_date(get_today()) >= get_limit()
+
+
 # ============================================================
-# СЛУЖЕБНЫЕ ФУНКЦИИ
+# СЛУЖЕБНЫЕ
 # ============================================================
 
 async def do_scan():
@@ -121,7 +126,8 @@ async def do_scan():
 
 
 async def do_moderate():
-    logger.info("[MODERATE] Автозапуск модерации")
+    """Раз в сутки в MODERATE_HOUR — предлагаем первый мем."""
+    logger.info("[MODERATE] Автозапуск модерации (раз в сутки)")
     await start_moderation(force=True)
 
 
@@ -142,6 +148,21 @@ async def cmd_scan(message: types.Message):
         f"📂 Обработано файлов: {count}\n\n"
         f"📦 Мемы в базе:\n{stats_text}"
     )
+
+
+@dp.message(Command("force"))
+async def cmd_force(message: types.Message):
+    """Сбросить все pending и запустить модерацию с нуля."""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    n = auto_cleanup_stale_pendings()
+    close_all_pending("expired")
+    await message.answer(
+        f"🔄 Сброшено pending: {n}\n"
+        f"Запускаю модерацию заново..."
+    )
+    await asyncio.sleep(1)
+    await start_moderation(force=True)
 
 
 @dp.message(Command("start"))
@@ -170,6 +191,7 @@ async def cmd_start(message: types.Message):
     now_str = now().strftime('%H:%M:%S')
     free_line = "✅ Есть свободные слоты" if has_free_slot() else "🚫 Все слоты на 14 дней забиты"
     pending_line = "⏳ Есть активный мем на модерации" if has_any_active_pending() else "✅ Модерация свободна"
+    full_line = "🎉 Лимит на сегодня набран" if today_is_full() else f"⏳ Сегодня ещё {limit - today_count} слотов свободно"
     await message.answer(
         f"{test_line}"
         f"🤖 Бот запущен!\n"
@@ -180,12 +202,14 @@ async def cmd_start(message: types.Message):
         f"📅 Сегодня ({today.strftime('%d.%m')}): {today_count}/{limit} (опубликовано: {posted_today})\n"
         f"📅 Завтра ({tomorrow.strftime('%d.%m')}): {tomorrow_count}/{limit}\n"
         f"{free_line}\n"
-        f"{pending_line}\n\n"
+        f"{pending_line}\n"
+        f"{full_line}\n\n"
         f"Автозадачи:\n"
         f"  • scan в {SCAN_HOUR:02d}:00\n"
         f"  • moderate в {MODERATE_HOUR:02d}:00\n\n"
         f"/scan — просканировать папку memes\n"
         f"/moderate — предложить мем вручную\n"
+        f"/force — сбросить pending и запустить модерацию\n"
         f"/status — статус\n"
         f"/set_limit N — лимит\n"
         f"/set_hours X Y — часы публикации\n"
@@ -214,6 +238,7 @@ async def cmd_status(message: types.Message):
     now_str = now().strftime('%H:%M:%S')
     free_line = "✅ Есть свободные слоты" if has_free_slot() else "🚫 Все слоты на 14 дней забиты"
     pending_line = "⏳ Есть активный мем на модерации" if has_any_active_pending() else "✅ Модерация свободна"
+    full_line = "🎉 Лимит на сегодня набран" if today_is_full() else f"⏳ Сегодня ещё {limit - today_count} слотов свободно"
     await message.answer(
         f"📊 Настройки:{test_line}"
         f"🕒 Сейчас: {now_str} MSK\n"
@@ -223,6 +248,7 @@ async def cmd_status(message: types.Message):
         f"• Канал: {CHANNEL_ID or '—'}\n"
         f"• {free_line}\n"
         f"• {pending_line}\n"
+        f"• {full_line}\n"
         f"• scan в {SCAN_HOUR:02d}:00, moderate в {MODERATE_HOUR:02d}:00\n\n"
         f"📅 Сегодня ({today.strftime('%d.%m')}): {today_count}/{limit} (опубликовано: {posted_today})\n"
         f"📅 Завтра ({tomorrow.strftime('%d.%m')}): {tomorrow_count}/{limit}\n\n"
@@ -381,7 +407,7 @@ async def cmd_reset_moderation(message: types.Message):
 
 
 # ============================================================
-# ПРИЁМ МЕМОВ В ЛИЧКУ
+# ПРИЁМ МЕМОВ
 # ============================================================
 
 @dp.message(lambda m: m.chat.type == "private" and (m.photo or m.animation or m.video))
@@ -431,7 +457,6 @@ async def handle_suggestion(message: types.Message):
     sender_name = message.from_user.full_name or f"id{sender_id}"
     sender_link = f"@{message.from_user.username}" if message.from_user.username else f"id{sender_id}"
 
-    # --- АДМИН: просто в базу ---
     if is_admin:
         stats = get_memes_stats()
         new_count = stats.get("new", 0)
@@ -442,7 +467,6 @@ async def handle_suggestion(message: types.Message):
         )
         return
 
-    # --- ЮЗЕР: проверяем время и активный pending ---
     if not is_moderation_time():
         await message.answer(
             "✅ Мем сохранён!\n"
@@ -450,7 +474,6 @@ async def handle_suggestion(message: types.Message):
         )
         return
 
-    # Если уже есть активный pending — не отправляем, ждём
     if has_any_active_pending():
         await message.answer(
             "✅ Мем сохранён!\n"
@@ -538,7 +561,6 @@ async def handle_callback(callback: types.CallbackQuery):
                 pass
             await callback.answer("⏭ Ок")
 
-        # После решения по юзерскому мему — проверим, нет ли ещё pending
         await asyncio.sleep(1)
         if not has_any_active_pending():
             await start_moderation(force=True)
@@ -710,20 +732,35 @@ def get_next_slot_with_gap():
 
 
 # ============================================================
-# МОДЕРАЦИЯ ИЗ ПАПКИ
+# МОДЕРАЦИЯ
 # ============================================================
 
 async def start_moderation(force: bool = False):
+    # 1. Проверка времени (обход при force)
     if not force and not is_moderation_time():
         return
 
-    # ЕСЛИ ЕСТЬ ХОТЬ ОДИН АКТИВНЫЙ PENDING — НЕ ПРЕДЛАГАЕМ НОВЫЙ
+    # 2. Уже есть активный pending — не предлагаем новый
     if has_any_active_pending():
         if force:
             for admin_id in ADMIN_IDS:
                 await bot.send_message(admin_id, "⏳ Уже есть активный мем на модерации. Прими решение по нему.")
         return
 
+    # 3. На сегодня лимит набран — стоп до завтра
+    if today_is_full():
+        if force:
+            today_count = count_scheduled_for_date(get_today())
+            limit = get_limit()
+            for admin_id in ADMIN_IDS:
+                await bot.send_message(
+                    admin_id,
+                    f"🎉 Лимит на сегодня набран ({today_count}/{limit}).\n"
+                    f"Возвращайся завтра или напиши /simulate_new_day для сброса."
+                )
+        return
+
+    # 4. Все 14 дней забиты — стоп
     if not has_free_slot():
         if force:
             for admin_id in ADMIN_IDS:
@@ -825,20 +862,8 @@ async def process_scheduled_posts():
         logger.error(f"process_scheduled_posts ошибка: {e}", exc_info=True)
 
 
-async def auto_offer():
-    try:
-        if not is_moderation_time():
-            return
-        if not has_free_slot():
-            return
-        if has_any_active_pending():
-            return
-        await start_moderation(force=False)
-    except Exception as e:
-        logger.error(f"auto_offer ошибка: {e}", exc_info=True)
-
-
 async def cleanup_old_pending():
+    """Просто чистит старые pending. НЕ перезапускает модерацию."""
     try:
         grouped = get_old_pending_grouped(hours=1)
         for chat_id, items in grouped.items():
@@ -850,9 +875,7 @@ async def cleanup_old_pending():
                         pass
                 expire_pending(item["id"])
         if grouped:
-            await asyncio.sleep(1)
-            if not has_any_active_pending():
-                await start_moderation(force=True)
+            logger.info(f"Очищено старых pending: {len(grouped)} чатов")
     except Exception as e:
         logger.error(f"cleanup_old_pending ошибка: {e}", exc_info=True)
 
@@ -872,13 +895,24 @@ async def check_permissions():
 
 async def main():
     init_db()
+
+    cleaned = auto_cleanup_stale_pendings()
+    if cleaned:
+        logger.info(f"🧹 При старте закрыто старых pending: {cleaned}")
+
+    left = close_all_pending("expired")
+    if left:
+        logger.info(f"🧹 При старте закрыто активных pending: {left}")
+
     await bot.delete_webhook(drop_pending_updates=True)
     await check_permissions()
 
+    # Публикация постов — каждую минуту
     scheduler.add_job(process_scheduled_posts, 'interval', minutes=1)
+    # Очистка старых pending — раз в 5 минут
     scheduler.add_job(cleanup_old_pending, 'interval', minutes=5)
-    scheduler.add_job(auto_offer, 'interval', minutes=30)
 
+    # Раз в сутки: скан в SCAN_HOUR, модерация в MODERATE_HOUR
     scheduler.add_job(do_scan, 'cron', hour=SCAN_HOUR, minute=0, id='daily_scan')
     scheduler.add_job(do_moderate, 'cron', hour=MODERATE_HOUR, minute=0, id='daily_moderate')
 
@@ -887,14 +921,14 @@ async def main():
     now_str = now().strftime('%H:%M:%S')
     logger.info("=" * 50)
     logger.info(f"Бот запущен. Время: {now_str} MSK")
-    logger.info(f"Расписание: scan в {SCAN_HOUR:02d}:00, moderate в {MODERATE_HOUR:02d}:00")
+    logger.info(f"Расписание: scan в {SCAN_HOUR:02d}:00, moderate в {MODERATE_HOUR:02d}:00 (раз в сутки)")
     logger.info("=" * 50)
 
     await asyncio.sleep(3)
-    if is_moderation_time() and not has_any_active_pending():
+    if is_moderation_time() and not today_is_full():
         await start_moderation(force=True)
     else:
-        logger.info(f"Вне времени модерации или есть pending. Ждём.")
+        logger.info(f"Вне времени модерации или лимит набран. Ждём.")
 
     await dp.start_polling(bot)
 

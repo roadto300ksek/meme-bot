@@ -5,6 +5,9 @@ from zoneinfo import ZoneInfo
 MSK = ZoneInfo("Europe/Moscow")
 DB_PATH = "memes.db"
 
+# Сколько минут pending считается активным
+PENDING_TTL_MINUTES = 60
+
 
 def now():
     return datetime.now(MSK).replace(tzinfo=None)
@@ -142,24 +145,25 @@ def has_active_pending_for_meme(meme_id):
 
 
 def has_active_pending_for_chat(chat_id):
-    """Есть ли у этого чата активный pending."""
+    cutoff = (now() - timedelta(minutes=PENDING_TTL_MINUTES)).isoformat()
     with get_db() as conn:
         row = conn.execute("""
             SELECT id FROM pending_moderation
-            WHERE chat_id = ? AND status = 'pending'
+            WHERE chat_id = ? AND status = 'pending' AND created_at >= ?
             LIMIT 1
-        """, (chat_id,)).fetchone()
+        """, (chat_id, cutoff)).fetchone()
         return row is not None
 
 
 def has_any_active_pending():
-    """Есть ли ХОТЬ ОДИН активный pending у любого админа."""
+    """Свежий pending (< PENDING_TTL_MINUTES) у любого админа."""
+    cutoff = (now() - timedelta(minutes=PENDING_TTL_MINUTES)).isoformat()
     with get_db() as conn:
         row = conn.execute("""
             SELECT id FROM pending_moderation
-            WHERE status = 'pending'
+            WHERE status = 'pending' AND created_at >= ?
             LIMIT 1
-        """).fetchone()
+        """, (cutoff,)).fetchone()
         return row is not None
 
 
@@ -198,6 +202,7 @@ def close_all_pending(status="expired"):
     with get_db() as conn:
         conn.execute("UPDATE pending_moderation SET status = ? WHERE status = 'pending'", (status,))
         conn.commit()
+        return conn.total_changes
 
 
 def get_old_pending_grouped(hours=1):
@@ -294,3 +299,15 @@ def get_memes_stats():
     with get_db() as conn:
         rows = conn.execute("SELECT status, COUNT(*) as cnt FROM memes GROUP BY status").fetchall()
         return {row["status"]: row["cnt"] for row in rows}
+
+
+def auto_cleanup_stale_pendings():
+    """Помечает pending старше PENDING_TTL_MINUTES как expired. Возвращает число."""
+    cutoff = (now() - timedelta(minutes=PENDING_TTL_MINUTES)).isoformat()
+    with get_db() as conn:
+        cursor = conn.execute(
+            "UPDATE pending_moderation SET status='expired' WHERE status='pending' AND created_at < ?",
+            (cutoff,)
+        )
+        conn.commit()
+        return cursor.rowcount

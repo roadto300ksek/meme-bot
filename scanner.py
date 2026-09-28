@@ -1,17 +1,15 @@
+# OPTIMIZED: async SHA-1 через utils, await на БД, убран дубликат compute_sha1
+import logging
 import os
-import hashlib
-from datetime import datetime
+
 from config import MEMES_PATH
-from database import add_meme, get_setting, set_setting
+from database import add_meme, set_setting
+from utils import ALLOWED_EXT, compute_sha1, now_ts
 
-def compute_sha1(file_path):
-    sha1 = hashlib.sha1()
-    with open(file_path, "rb") as f:
-        while chunk := f.read(8192):
-            sha1.update(chunk)
-    return sha1.hexdigest()
+logger = logging.getLogger(__name__)
 
-def scan_memes_folder():
+
+async def scan_memes_folder() -> int:
     if not os.path.exists(MEMES_PATH):
         os.makedirs(MEMES_PATH, exist_ok=True)
         return 0
@@ -21,13 +19,18 @@ def scan_memes_folder():
         file_path = os.path.join(MEMES_PATH, filename)
         if not os.path.isfile(file_path):
             continue
-        ext = filename.split(".")[-1].lower()
-        if ext not in ("jpg", "jpeg", "png", "gif", "mp4", "webm"):
+        ext = filename.rsplit(".", 1)[-1].lower()
+        if ext not in ALLOWED_EXT:
             continue
 
-        sha1 = compute_sha1(file_path)
-        add_meme(filename, sha1, file_path)
+        try:
+            sha1 = await compute_sha1(file_path)
+        except OSError as e:
+            logger.warning(f"Не удалось прочитать {file_path}: {e}")
+            continue
+
+        await add_meme(filename, sha1, file_path)
         count += 1
 
-    set_setting("last_index_date", datetime.now().isoformat())
+    await set_setting("last_index_date", str(now_ts()))
     return count
